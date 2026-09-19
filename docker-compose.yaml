@@ -1,0 +1,174 @@
+x-airflow-common: &airflow-common
+  image: apache/airflow:3.3.1
+
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: ${AIRFLOW_METADATA_SQL_ALCHEMY_CONN:?AIRFLOW_METADATA_SQL_ALCHEMY_CONN is required}
+
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:?AIRFLOW_FERNET_KEY is required}
+
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+
+    # Для локального pet-project:
+    # UI будет доступен без отдельной авторизации.
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "true"
+
+    # Airflow 3: задачи общаются с API Server
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
+
+    # Один и тот же JWT secret для компонентов Airflow
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:?AIRFLOW_JWT_SECRET is required}
+
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./logs:/opt/airflow/logs
+    - ./data:/opt/airflow/data
+
+  depends_on:
+    airflow-postgres:
+      condition: service_healthy
+
+
+services:
+
+  # ----------------------------------------
+  # Наш DWH
+  # ----------------------------------------
+
+  postgres:
+    image: postgres:17
+    container_name: taldau-postgres
+
+    environment:
+      POSTGRES_DB: ${TALDAU_POSTGRES_DB:?TALDAU_POSTGRES_DB is required}
+      POSTGRES_USER: ${TALDAU_POSTGRES_USER:?TALDAU_POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${TALDAU_POSTGRES_PASSWORD:?TALDAU_POSTGRES_PASSWORD is required}
+
+    ports:
+      - "5434:5432"
+
+    volumes:
+      - taldau_pgdata:/var/lib/postgresql/data
+
+
+  # ----------------------------------------
+  # Metadata DB для Airflow
+  # ----------------------------------------
+
+  airflow-postgres:
+    image: postgres:16
+    container_name: taldau-airflow-postgres
+
+    environment:
+      POSTGRES_DB: ${AIRFLOW_POSTGRES_DB:?AIRFLOW_POSTGRES_DB is required}
+      POSTGRES_USER: ${AIRFLOW_POSTGRES_USER:?AIRFLOW_POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${AIRFLOW_POSTGRES_PASSWORD:?AIRFLOW_POSTGRES_PASSWORD is required}
+
+    volumes:
+      - airflow_pgdata:/var/lib/postgresql/data
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+
+  # ----------------------------------------
+  # Инициализация Airflow
+  # ----------------------------------------
+
+  airflow-init:
+    <<: *airflow-common
+
+    container_name: taldau-airflow-init
+
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_MIGRATE: "true"
+
+    command: version
+
+
+  # ----------------------------------------
+  # Airflow UI + API
+  # ----------------------------------------
+
+  airflow-apiserver:
+    <<: *airflow-common
+
+    container_name: taldau-airflow-apiserver
+
+    command: api-server
+
+    ports:
+      - "8082:8080"
+
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+
+
+  # ----------------------------------------
+  # Scheduler
+  # ----------------------------------------
+
+  airflow-scheduler:
+    <<: *airflow-common
+
+    container_name: taldau-airflow-scheduler
+
+    command: scheduler
+
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+
+
+  # ----------------------------------------
+  # DAG Processor
+  # ----------------------------------------
+
+  airflow-dag-processor:
+    <<: *airflow-common
+
+    container_name: taldau-airflow-dag-processor
+
+    command: dag-processor
+
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+
+
+  # ----------------------------------------
+  # Triggerer
+  # ----------------------------------------
+
+  airflow-triggerer:
+    <<: *airflow-common
+
+    container_name: taldau-airflow-triggerer
+
+    command: triggerer
+
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+
+
+volumes:
+  taldau_pgdata:
+  airflow_pgdata:
+
+ 
