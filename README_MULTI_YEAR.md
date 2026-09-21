@@ -167,7 +167,7 @@ diagnostics, даже при успешной загрузке. Уже validated
   с `DagRunAlreadyExists` завершается как SKIPPED. Существующий run не очищается;
   `reset_dag_run=True` запрещён оператором. Другие ошибки продолжают приводить к retry/failure.
   После validation выполняется diagnostics → STOP; publish остаётся отдельной CLI-командой.
-* Airflow Connection ID `taldau_dwh`: host, port, database/schema, login и secret из серверного
+* Airflow Connection ID `digest_target_db`: host, port, database/schema, login и secret из серверного
   secret store. Адрес БД задаётся относительно worker. Connection не должен указывать на Airflow metadata DB.
   Пароли и connection URI в документацию/репозиторий не переносить.
 * Pool `taldau_api` — 3 slots. Mapped tasks: 1 slot, максимум 3 tasks, 1 HTTP за раз;

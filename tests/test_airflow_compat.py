@@ -34,6 +34,19 @@ class AirflowImportTests(unittest.TestCase):
                 if isinstance(node, ast.keyword):
                     self.assertNotEqual(node.arg, 'skip_when_already_exists', str(path))
 
+    def test_production_dags_use_existing_database_connection(self):
+        connection_ids = []
+        for name in ('taldau_inv_fixed_assets_2025.py', 'taldau_inv_fixed_assets.py',
+                     'taldau_pipeline.py'):
+            tree = ast.parse((ROOT / 'dags' / name).read_text(encoding='utf-8'))
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                        and node.func.attr == 'get_connection' and node.args
+                        and isinstance(node.args[0], ast.Constant)):
+                    connection_ids.append(node.args[0].value)
+        self.assertEqual(len(connection_ids), 7)
+        self.assertEqual(set(connection_ids), {'digest_target_db'})
+
     def test_dags_import_from_nested_deployment_with_only_dag_root_on_path(self):
         class Node:
             def __init__(self, *args, **kwargs):

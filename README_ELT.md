@@ -11,7 +11,7 @@ CLI и read-only source fixture тестов используют `PGHOST`, `PGP
 Python сам `.env` не читает. Если `PGPASSWORD` отсутствует, libpq может использовать `.pgpass`
 (`pgpass.conf` на Windows); встроенного пароля по умолчанию нет. При отсутствии подходящих
 credentials libpq выдаёт ошибку подключения. Airflow DAG продолжает использовать Connection
-`taldau_dwh`. Пароль временного test PostgreSQL генерируется отдельно при каждом запуске,
+`digest_target_db`. Пароль временного test PostgreSQL генерируется отдельно при каждом запуске,
 передаётся контейнеру и тестам через environment и не выводится в лог.
 
 Подготовленная годовая загрузка описана в [README_SNAPSHOT_2025.md](README_SNAPSHOT_2025.md).
@@ -124,7 +124,7 @@ Gold использует `dim_inv_member`, `dim_inv_period`, `fact_inv_fixed_as
 ## Запуск из PowerShell
 
 Из корня проекта; CLI использует прежние локальные credentials и стандартные переменные PGHOST,
-PGPORT, PGDATABASE, PGUSER, PGPASSWORD для переопределения. Airflow использует `taldau_dwh`.
+PGPORT, PGDATABASE, PGUSER, PGPASSWORD для переопределения. Airflow использует `digest_target_db`.
 
 ```powershell
 .venv/Scripts/python.exe tools/run_investments_elt.py migrate-bronze

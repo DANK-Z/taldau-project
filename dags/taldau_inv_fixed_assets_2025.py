@@ -17,7 +17,7 @@ from taldau_elt.airflow_compat import SkipExistingDagRunOperator
 def connection():
     import psycopg2
     from airflow.hooks.base import BaseHook
-    c = BaseHook.get_connection('taldau_dwh')
+    c = BaseHook.get_connection('digest_target_db')
     return psycopg2.connect(host=c.host,port=c.port or 5432,dbname=c.schema,
                             user=c.login,password=c.password,connect_timeout=10)
 

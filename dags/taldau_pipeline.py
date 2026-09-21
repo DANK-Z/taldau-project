@@ -37,7 +37,7 @@ def taldau_pipeline():
         from airflow.hooks.base import BaseHook
 
         dwh_conn = BaseHook.get_connection(
-            "taldau_dwh"
+            "digest_target_db"
         )
 
         conn = psycopg2.connect(
@@ -486,7 +486,7 @@ def taldau_pipeline():
         # -------------------------
 
         dwh_conn = BaseHook.get_connection(
-            "taldau_dwh"
+            "digest_target_db"
         )
 
         conn = psycopg2.connect(
@@ -575,7 +575,7 @@ def taldau_pipeline():
         from airflow.hooks.base import BaseHook
 
         dwh_conn = BaseHook.get_connection(
-            "taldau_dwh"
+            "digest_target_db"
         )
 
         conn = psycopg2.connect(
@@ -723,7 +723,7 @@ def taldau_pipeline():
         # =========================================================
 
         dwh_conn = BaseHook.get_connection(
-            "taldau_dwh"
+            "digest_target_db"
         )
 
         conn = psycopg2.connect(
@@ -1025,7 +1025,7 @@ def taldau_pipeline():
         from airflow.hooks.base import BaseHook
 
         dwh_conn = BaseHook.get_connection(
-            "taldau_dwh"
+            "digest_target_db"
         )
 
         conn = psycopg2.connect(
