@@ -154,10 +154,19 @@ diagnostics, даже при успешной загрузке. Уже validated
   `tools/run_investments_elt.py`. Сохранить относительную структуру dags/tools/sql.
   Pilot `dags/taldau_inv_fixed_assets.py` и legacy `dags/taldau_pipeline.py` переносить без изменений,
   если они нужны на сервере. В tests/runtime SQL нет зависимостей от локального Windows пути.
-* Проверенная локальная база — PostgreSQL 17. Airflow DAG использует SDK 3.3.1 и
-  `apache-airflow-providers-standard` (TriggerDagRunOperator). Runtime пакеты:
-  `requests`, `urllib3`, `psycopg2`/`psycopg2-binary`, `pendulum`; Python с синтаксисом 3.10+.
-  На сервере проверить совместимость с установленной версией Airflow, не обновлять её вслепую.
+* Основной production runtime — Apache Airflow **2.9.2**, Python **3.12**, LocalExecutor.
+  DAG используют `airflow.decorators`, `airflow.models.param`, `airflow.hooks.base`,
+  `airflow.operators.python` и встроенный `airflow.operators.trigger_dagrun`.
+  `apache-airflow-providers-standard` не требуется. Runtime пакеты:
+  `requests`, `urllib3`, `psycopg2`/`psycopg2-binary`, `pendulum`.
+  Проверенная локальная база — PostgreSQL 17. Существующий локальный docker-compose
+  с Airflow 3.3.1 не является production-конфигурацией 2.9.2 и этой правкой не меняется.
+  Не понижать версию поверх существующей Airflow metadata DB.
+* Вместе с DAG переносить `dags/taldau_elt/airflow_compat.py`.
+  `SkipExistingDagRunOperator` сохраняет deterministic `trigger_run_id`: повторный trigger
+  с `DagRunAlreadyExists` завершается как SKIPPED. Существующий run не очищается;
+  `reset_dag_run=True` запрещён оператором. Другие ошибки продолжают приводить к retry/failure.
+  После validation выполняется diagnostics → STOP; publish остаётся отдельной CLI-командой.
 * Airflow Connection ID `taldau_dwh`: host, port, database/schema, login и secret из серверного
   secret store. Адрес БД задаётся относительно worker. Connection не должен указывать на Airflow metadata DB.
   Пароли и connection URI в документацию/репозиторий не переносить.
@@ -181,6 +190,12 @@ diagnostics, даже при успешной загрузке. Уже validated
 * Offline regression: `.venv/Scripts/python.exe tests/run_offline_postgres.py` локально,
   `python tests/run_offline_postgres.py` на подготовленном test host. Runner требует локальный
   Docker image postgres:17 и сохранённый pilot fixture; не скачивает image и не делает HTTP.
+* Проверка DAG на отдельном test runtime с Airflow 2.9.2 / Python 3.12:
+  `python -m unittest discover -s tests -p test_airflow_compat.py -v`.
+  Проверяются parse всех трёх DAG, mapping/pool, ветвление, deterministic trigger и
+  SKIPPED при повторе. HTTP и подключения к PostgreSQL заблокированы mocks;
+  ни extraction, ни SQL tasks не выполняются. При отсутствии Airflow runtime-тесты
+  явно пропускаются; такой результат не подтверждает совместимость runtime.
 
 ## Файлы этого изменения
 

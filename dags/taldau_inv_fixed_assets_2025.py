@@ -2,13 +2,15 @@
 from datetime import timedelta
 
 import pendulum
-from airflow.sdk import Param, dag, task
-from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
+from airflow.decorators import dag, task
+from airflow.models.param import Param
+
+from taldau_elt.airflow_compat import SkipExistingDagRunOperator
 
 
 def connection():
     import psycopg2
-    from airflow.sdk import BaseHook
+    from airflow.hooks.base import BaseHook
     c = BaseHook.get_connection('taldau_dwh')
     return psycopg2.connect(host=c.host,port=c.port or 5432,dbname=c.schema,
                             user=c.login,password=c.password,connect_timeout=10)
@@ -24,7 +26,7 @@ def connection():
 def investments_2025():
     @task(retries=0)
     def authorize_snapshot():
-        from airflow.sdk import get_current_context
+        from airflow.operators.python import get_current_context
         from taldau_elt.snapshots import read_snapshot
         params=get_current_context()['params']
         if params.get('allow_extraction') is not True:
@@ -72,7 +74,7 @@ def investments_2025():
     @task.branch(trigger_rule='all_done',retries=0)
     def route_wave(snapshot_id,selected_ids):
         import hashlib
-        from airflow.sdk import get_current_context
+        from airflow.operators.python import get_current_context
         from taldau_elt.snapshots import wave_outcome
         conn=connection()
         try:
@@ -123,10 +125,10 @@ def investments_2025():
     route=route_wave(sid,ids)
     ids >> route
     mapped >> route
-    continuation=TriggerDagRunOperator(task_id='continue_snapshot',trigger_dag_id='taldau_inv_fixed_assets_2025',
+    continuation=SkipExistingDagRunOperator(task_id='continue_snapshot',trigger_dag_id='taldau_inv_fixed_assets_2025',
         trigger_run_id="{{ ti.xcom_pull(task_ids='route_wave', key='next_run_id') }}",
         conf={'snapshot_id':"{{ params.snapshot_id }}",'allow_extraction':True},
-        wait_for_completion=False,skip_when_already_exists=True)
+        wait_for_completion=False,reset_dag_run=False)
     checked=validate(sid)
     route >> [continuation,checked]
     diagnostics(checked)  # STOP: publication is exclusively an explicit CLI action.

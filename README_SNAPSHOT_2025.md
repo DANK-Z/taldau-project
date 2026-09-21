@@ -392,5 +392,10 @@ Python count mismatch с откатом, обратная совместимос
 
 Годовой и пилотный DAG при добавлении публикации Gold не изменяются; HTTP extraction не запускается.
 
-Документация: [Dynamic Task Mapping](https://airflow.apache.org/docs/apache-airflow/stable/authoring-and-scheduling/dynamic-task-mapping.html),
-[TriggerDagRunOperator](https://airflow.apache.org/docs/apache-airflow-providers-standard/stable/_api/airflow/providers/standard/operators/trigger_dagrun/index.html).
+Production runtime: Apache Airflow 2.9.2 / Python 3.12 / LocalExecutor.
+Continuation использует `SkipExistingDagRunOperator` из `taldau_elt.airflow_compat`:
+`DagRunAlreadyExists` → SKIPPED, без clear/reset. Deterministic run ID и граф сохранены;
+после diagnostics DAG останавливается, publication выполняется только отдельной CLI-командой.
+
+Документация: [Dynamic Task Mapping](https://airflow.apache.org/docs/apache-airflow/2.9.2/authoring-and-scheduling/dynamic-task-mapping.html),
+[TriggerDagRunOperator](https://airflow.apache.org/docs/apache-airflow/2.9.2/_api/airflow/operators/trigger_dagrun/index.html).

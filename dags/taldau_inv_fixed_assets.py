@@ -2,12 +2,13 @@
 from datetime import timedelta
 
 import pendulum
-from airflow.sdk import Param, dag, task
+from airflow.decorators import dag, task
+from airflow.models.param import Param
 
 
 def _connection():
     import psycopg2
-    from airflow.sdk import BaseHook
+    from airflow.hooks.base import BaseHook
 
     c = BaseHook.get_connection('taldau_dwh')
     return psycopg2.connect(host=c.host,port=c.port or 5432,dbname=c.schema,
@@ -23,7 +24,7 @@ def _connection():
 def taldau_inv_fixed_assets():
     @task
     def get_metadata():
-        from airflow.sdk import get_current_context
+        from airflow.operators.python import get_current_context
         from taldau_elt.loader import get_config, PILOT_SCOPE
 
         context = get_current_context()

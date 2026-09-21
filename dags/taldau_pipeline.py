@@ -2,7 +2,7 @@ from datetime import timedelta
 
 import pendulum
 
-from airflow.sdk import dag, task
+from airflow.decorators import dag, task
 
 
 @dag(
@@ -28,7 +28,7 @@ def taldau_pipeline():
     def get_indicators():
 
         import psycopg2
-        from airflow.sdk import BaseHook
+        from airflow.hooks.base import BaseHook
 
         dwh_conn = BaseHook.get_connection(
             "taldau_dwh"
@@ -423,7 +423,7 @@ def taldau_pipeline():
         from datetime import date
 
         import psycopg2
-        from airflow.sdk import BaseHook
+        from airflow.hooks.base import BaseHook
         from psycopg2.extras import execute_values
 
         # -------------------------
@@ -566,7 +566,7 @@ def taldau_pipeline():
     def validate_silver(indicators):
 
         import psycopg2
-        from airflow.sdk import BaseHook
+        from airflow.hooks.base import BaseHook
 
         dwh_conn = BaseHook.get_connection(
             "taldau_dwh"
@@ -710,7 +710,7 @@ def taldau_pipeline():
 
         import psycopg2
 
-        from airflow.sdk import BaseHook
+        from airflow.hooks.base import BaseHook
 
         # =========================================================
         # Подключение
@@ -1016,7 +1016,7 @@ def taldau_pipeline():
     def validate_gold():
 
         import psycopg2
-        from airflow.sdk import BaseHook
+        from airflow.hooks.base import BaseHook
 
         dwh_conn = BaseHook.get_connection(
             "taldau_dwh"
