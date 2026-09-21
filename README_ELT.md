@@ -23,7 +23,7 @@ credentials libpq выдаёт ошибку подключения. Airflow DAG 
 ## Что было и что изменено
 
 В старом DAG: `extract -> transform (Python wide-to-long) -> load_silver -> build_gold (SQL)`.
-Его `metadata.taldau_indicators` содержит в том числе 701827 с period_id=7 и другими измерениями;
+Его `taldau.metadata_taldau_indicators` содержит в том числе 701827 с period_id=7 и другими измерениями;
 это другой набор данных, его конфигурация сохранена.
 
 Новый DAG `taldau_inv_fixed_assets`:
@@ -40,7 +40,7 @@ SQL PostgreSQL выполняет разбор JSONB, фильтрацию `x`, 
 
 Чтобы позже перевести region_metric на ELT, нужно отдельно заменить его `extract` на Bronze loader,
 а `transform/load_silver` на SQL с прежним grain. Существующий SQL Gold можно вынести в миграции,
-сохранив `gold.v_region_year_metrics`. Cube не направляется в `silver.statistics_region`.
+сохранив `taldau.gold_v_region_year_metrics`. Cube не направляется в `taldau.silver_statistics_region`.
 
 ## Файлы
 
@@ -63,7 +63,7 @@ SQL PostgreSQL выполняет разбор JSONB, фильтрацию `x`, 
 
 ## Bronze и версии
 
-`bronze.taldau_api_raw`: один полный ответ на запрос. Сохраняются endpoint, все параметры,
+`taldau.bronze_taldau_api_raw`: один полный ответ на запрос. Сохраняются endpoint, все параметры,
 indicator_id, period_id, HTTP status, время, run_id, контекст обхода, JSONB и исходный текст HTTP body.
 API возвращает много периодов сразу; они остаются в Bronze, даже если Silver пилота берёт только декабрь.
 В запросе KATO root также возвращаются соседние территории. Это неизменённый ответ для определения
@@ -81,7 +81,7 @@ JSONB нормализует форматирование/порядок клю�
 * Новый run_id сохраняет новую версию ответов, включая пересмотренную историю.
 * `response_hash` фиксирует содержимое исходного текста. Одинаковые ответы разных запусков намеренно
   остаются отдельными наблюдениями; бесконтрольного размножения при retry нет.
-* Конфигурация и scope фиксируются в `bronze.extraction_runs`; несовместимое переиспользование run_id запрещено.
+* Конфигурация и scope фиксируются в `taldau.bronze_extraction_runs`; несовместимое переиспользование run_id запрещено.
 * Каждый HTTP response сохраняется одной транзакцией вместе со всеми его узлами. Уже сохранённые ответы
   переживают ошибку/перезапуск; run становится complete только после всего обхода.
 * Session lock запрещает одновременный обход одного run_id; API pool имеет 3 слота, task использует 1,
@@ -95,7 +95,7 @@ JSONB нормализует форматирование/порядок клю�
 
 ## Silver и Gold
 
-`silver.inv_fixed_assets` имеет ключ
+`taldau.silver_inv_fixed_assets` имеет ключ
 `(indicator_id, reporting_period, kato_id, krp_id, sif_id, gsvziok_id)`.
 Уникальность подтверждена на пилоте; для страны потребуется отдельная проверка.
 Строка хранит source_run_id, source_raw_id, порядковый номер исходного узла.
@@ -108,7 +108,7 @@ JSONB нормализует форматирование/порядок клю�
 Для period_id=8 даты означают накопительный период: start_date = 1 января,
 end_date и period_date = последний день месяца. Это правило нельзя автоматически применять к другим типам периода.
 
-`silver.dim_territory` использует source ID; parent_id и depth берутся из фактических запросов дерева.
+`taldau.silver_dim_territory` использует source ID; parent_id и depth берутся из фактических запросов дерева.
 `territory_level` пока NULL: depth не выдаётся за административный уровень.
 В пилоте собраны корень и непосредственные дети; полный справочник населённых пунктов ещё не загружен.
 
@@ -158,11 +158,11 @@ PGPORT, PGDATABASE, PGUSER, PGPASSWORD для переопределения. Ai
 ## Проверка
 
 ```sql
-SELECT bronze.validate_inv_pilot('astana-2025-12-pilot-v1');
-SELECT count(*) FROM silver.inv_fixed_assets WHERE kato_id=268012 AND reporting_period=1069;
-SELECT raw_value,count(*) FROM bronze.v_inv_candidates
+SELECT taldau.bronze_validate_inv_pilot('astana-2025-12-pilot-v1');
+SELECT count(*) FROM taldau.silver_inv_fixed_assets WHERE kato_id=268012 AND reporting_period=1069;
+SELECT raw_value,count(*) FROM taldau.bronze_v_inv_candidates
 WHERE run_id='astana-2025-12-pilot-v1' AND value IS NULL GROUP BY raw_value;
-SELECT * FROM gold.mart_inv_territory_totals;
+SELECT * FROM taldau.gold_mart_inv_territory_totals;
 ```
 
 Результат пилота: 414 raw responses, 511 комбинаций, 504 numeric, 7 x, дублей 0.

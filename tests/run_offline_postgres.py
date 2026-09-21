@@ -14,6 +14,7 @@ import time
 import uuid
 
 import psycopg2
+from psycopg2 import sql
 
 ROOT=Path(__file__).resolve().parents[1]
 PILOT='astana-2025-12-pilot-v1'
@@ -26,14 +27,25 @@ def main() -> int:
     source.set_session(readonly=True)
     try:
         with source.cursor() as cur:
-            cur.execute('''SELECT run_id,pipeline_id,config::text,scope::text FROM bronze.extraction_runs
-                WHERE run_id=%s''',(PILOT,))
+            cur.execute("""SELECT to_regclass('taldau.bronze_extraction_runs'),
+                                      to_regclass(format('%I.%I','bronze','extraction_runs'))""")
+            single_schema,legacy_schema=cur.fetchone()
+            if single_schema:
+                source_schema,runs_table,raw_table='taldau','bronze_extraction_runs','bronze_taldau_api_raw'
+            elif legacy_schema:
+                # Read-only compatibility for the cached local fixture; runtime code has no fallback.
+                source_schema,runs_table,raw_table='bronze','extraction_runs','taldau_api_raw'
+            else:
+                raise RuntimeError('Cached pilot fixture schema is missing; no HTTP fallback')
+            cur.execute(sql.SQL('''SELECT run_id,pipeline_id,config::text,scope::text FROM {}.{}
+                WHERE run_id=%s''').format(sql.Identifier(source_schema),sql.Identifier(runs_table)),(PILOT,))
             run=cur.fetchone()
             if run is None:
                 raise RuntimeError('Cached pilot fixture is required; no HTTP fallback')
-            cur.execute('''SELECT run_id,indicator_id,endpoint,period_id,request_params::text,request_hash,
+            cur.execute(sql.SQL('''SELECT run_id,indicator_id,endpoint,period_id,request_params::text,request_hash,
                 response_data::text,response_text,response_hash,http_status,dimension,tree_depth
-                FROM bronze.taldau_api_raw WHERE run_id=%s ORDER BY id''',(PILOT,))
+                FROM {}.{} WHERE run_id=%s ORDER BY id''').format(
+                    sql.Identifier(source_schema),sql.Identifier(raw_table)),(PILOT,))
             raw=cur.fetchall()
     finally:
         source.close()
@@ -60,6 +72,17 @@ def main() -> int:
         env=os.environ.copy()
         env.update(PGHOST=config['host'],PGPORT=port,PGDATABASE='taldau',PGUSER='taldau',
                    PGPASSWORD=password,TALDAU_TEST_DB='1',PYTHONIOENCODING='utf-8')
+        # A second empty database exercises migration 009 from a generated legacy 001-008
+        # layout. It exists only inside this disposable container.
+        legacy_database='taldau_legacy_tests'
+        admin=psycopg2.connect(**config)
+        try:
+            admin.autocommit=True
+            with admin.cursor() as cur:
+                cur.execute(sql.SQL('CREATE DATABASE {}').format(sql.Identifier(legacy_database)))
+        finally:
+            admin.close()
+        env['TALDAU_LEGACY_TEST_DATABASE']=legacy_database
         # Exercise the existing deployment commands, including safe migration replay.
         commands=[['tools/run_investments_elt.py','migrate-bronze'],
                   ['tools/run_investments_elt.py','migrate-silver'],
@@ -71,14 +94,14 @@ def main() -> int:
         try:
             with target:
                 with target.cursor() as cur:
-                    cur.execute('''INSERT INTO bronze.extraction_runs(run_id,pipeline_id,config,scope,status)
+                    cur.execute('''INSERT INTO taldau.bronze_extraction_runs(run_id,pipeline_id,config,scope,status)
                         VALUES(%s,%s,%s::jsonb,%s::jsonb,'bronze_complete')''',run)
-                    cur.executemany('''INSERT INTO bronze.taldau_api_raw
+                    cur.executemany('''INSERT INTO taldau.bronze_taldau_api_raw
                         (run_id,indicator_id,endpoint,period_id,request_params,request_hash,response_data,
                          response_text,response_hash,http_status,dimension,tree_depth)
                         VALUES(%s,%s,%s,%s,%s::jsonb,%s,%s::jsonb,%s,%s,%s,%s,%s)''',raw)
-                    cur.execute('SELECT silver.refresh_inv_pilot(%s)',(PILOT,))
-                    cur.execute('SELECT gold.refresh_inv_pilot(%s)',(PILOT,))
+                    cur.execute('SELECT taldau.silver_refresh_inv_pilot(%s)',(PILOT,))
+                    cur.execute('SELECT taldau.gold_refresh_inv_pilot(%s)',(PILOT,))
         finally:
             target.close()
         print(f'Isolated test database ready; copied {len(raw)} cached responses; HTTP extraction disabled.',flush=True)

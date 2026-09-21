@@ -53,16 +53,16 @@ class DatabaseTests(unittest.TestCase):
             password=os.getenv('PGPASSWORD'))
         self.run='test-'+uuid.uuid4().hex
         with self.conn.cursor() as cur:
-            cur.execute('''INSERT INTO bronze.extraction_runs(run_id,pipeline_id,config,scope,status)
-                SELECT %s,pipeline_id,config,scope,'bronze_complete' FROM bronze.extraction_runs
+            cur.execute('''INSERT INTO taldau.bronze_extraction_runs(run_id,pipeline_id,config,scope,status)
+                SELECT %s,pipeline_id,config,scope,'bronze_complete' FROM taldau.bronze_extraction_runs
                 WHERE run_id='astana-2025-12-pilot-v1' RETURNING config''',(self.run,))
             self.config=cur.fetchone()[0]
-            cur.execute('''INSERT INTO bronze.taldau_api_raw
+            cur.execute('''INSERT INTO taldau.bronze_taldau_api_raw
                 (run_id,indicator_id,endpoint,period_id,request_params,request_hash,response_data,
                  response_text,response_hash,http_status,dimension,tree_depth)
                 SELECT %s,indicator_id,endpoint,period_id,request_params,request_hash,response_data,
                     response_text,response_hash,http_status,dimension,tree_depth
-                FROM bronze.taldau_api_raw WHERE run_id='astana-2025-12-pilot-v1' ''',(self.run,))
+                FROM taldau.bronze_taldau_api_raw WHERE run_id='astana-2025-12-pilot-v1' ''',(self.run,))
 
     def tearDown(self):
         self.conn.rollback()
@@ -70,7 +70,7 @@ class DatabaseTests(unittest.TestCase):
 
     def test_partial_run_resumes_entire_tree_without_network(self):
         with self.conn.cursor() as cur:
-            cur.execute("UPDATE bronze.extraction_runs SET status='failed' WHERE run_id=%s",(self.run,))
+            cur.execute("UPDATE taldau.bronze_extraction_runs SET status='failed' WHERE run_id=%s",(self.run,))
         loader=BronzeLoader(NoCommit(self.conn),self.run,self.config,PILOT_SCOPE,delay=0)
         loader.session.get=Mock(side_effect=AssertionError('Resume must use saved responses'))
         result=loader.extract_pilot()
@@ -80,7 +80,7 @@ class DatabaseTests(unittest.TestCase):
 
     def _change_node(self,change):
         with self.conn.cursor() as cur:
-            cur.execute('''SELECT id,response_text FROM bronze.taldau_api_raw
+            cur.execute('''SELECT id,response_text FROM taldau.bronze_taldau_api_raw
                 WHERE run_id=%s AND dimension='gsvziok'
                   AND request_params->>'p_terms'='268012,741927,807855,19202525'
                   AND response_data @> '[{"id":"19202537"}]'::jsonb''',(self.run,))
@@ -88,39 +88,39 @@ class DatabaseTests(unittest.TestCase):
             nodes=json.loads(text)
             change(nodes,next(n for n in nodes if n['id']=='19202537'))
             body=json.dumps(nodes,ensure_ascii=False)
-            cur.execute('UPDATE bronze.taldau_api_raw SET response_data=%s::jsonb,response_text=%s WHERE id=%s',
+            cur.execute('UPDATE taldau.bronze_taldau_api_raw SET response_data=%s::jsonb,response_text=%s WHERE id=%s',
                         (body,body,raw_id))
 
     def test_unknown_value_fails_quality_gate(self):
         self._change_node(lambda nodes,node:node.update(y122025='unexpected'))
         with self.assertRaisesRegex(psycopg2.Error,'Invalid rows'):
-            with self.conn.cursor() as cur: cur.execute('SELECT bronze.validate_inv_pilot(%s)',(self.run,))
+            with self.conn.cursor() as cur: cur.execute('SELECT taldau.bronze_validate_inv_pilot(%s)',(self.run,))
 
     def test_duplicate_combination_is_not_deduplicated_silently(self):
         self._change_node(lambda nodes,node:nodes.append(node.copy()))
         with self.assertRaisesRegex(psycopg2.Error,'duplicate natural keys: 1'):
-            with self.conn.cursor() as cur: cur.execute('SELECT bronze.validate_inv_pilot(%s)',(self.run,))
+            with self.conn.cursor() as cur: cur.execute('SELECT taldau.bronze_validate_inv_pilot(%s)',(self.run,))
 
     def test_x_change_is_preserved_but_does_not_fake_expected_counts(self):
         self._change_node(lambda nodes,node:node.update(y122025='x'))
         with self.assertRaisesRegex(psycopg2.Error,'numeric 503, x 8'):
-            with self.conn.cursor() as cur: cur.execute('SELECT silver.refresh_inv_pilot(%s)',(self.run,))
+            with self.conn.cursor() as cur: cur.execute('SELECT taldau.silver_refresh_inv_pilot(%s)',(self.run,))
 
     def test_exact_decimal_and_offline_sql_rebuild(self):
         self._change_node(lambda nodes,node:node.update(y122025='1798175695000.123456789'))
         with self.conn.cursor() as cur:
-            cur.execute('SELECT silver.refresh_inv_pilot(%s)',(self.run,))
-            cur.execute('''SELECT value::text FROM silver.inv_fixed_assets WHERE source_run_id=%s
+            cur.execute('SELECT taldau.silver_refresh_inv_pilot(%s)',(self.run,))
+            cur.execute('''SELECT value::text FROM taldau.silver_inv_fixed_assets WHERE source_run_id=%s
                 AND krp_id=741927 AND sif_id=807855 AND gsvziok_id=19202537''',(self.run,))
             self.assertEqual(cur.fetchone()[0],'1798175695000.123456789')
-            cur.execute('SELECT gold.refresh_inv_pilot(%s)',(self.run,))
+            cur.execute('SELECT taldau.gold_refresh_inv_pilot(%s)',(self.run,))
             self.assertEqual(cur.fetchone()[0],504)
 
     def test_incomplete_run_cannot_publish_silver(self):
         with self.conn.cursor() as cur:
-            cur.execute("UPDATE bronze.extraction_runs SET status='loading' WHERE run_id=%s",(self.run,))
+            cur.execute("UPDATE taldau.bronze_extraction_runs SET status='loading' WHERE run_id=%s",(self.run,))
         with self.assertRaisesRegex(psycopg2.Error,'Extraction is not complete'):
-            with self.conn.cursor() as cur: cur.execute('SELECT silver.refresh_inv_pilot(%s)',(self.run,))
+            with self.conn.cursor() as cur: cur.execute('SELECT taldau.silver_refresh_inv_pilot(%s)',(self.run,))
 
 
 if __name__=='__main__': unittest.main()

@@ -63,7 +63,7 @@ def taldau_pipeline():
                         dic_ids,
                         idx,
                         parent_id
-                    FROM metadata.taldau_indicators
+                    FROM taldau.metadata_taldau_indicators
                     WHERE is_active = TRUE
                     ORDER BY indicator_id;
                 """)
@@ -88,7 +88,7 @@ def taldau_pipeline():
 
                 if not indicators:
                     raise ValueError(
-                        "В metadata.taldau_indicators "
+                        "В taldau.metadata_taldau_indicators "
                         "нет активных показателей."
                     )
 
@@ -502,7 +502,7 @@ def taldau_pipeline():
         # -------------------------
 
         insert_sql = """
-            INSERT INTO silver.statistics_region (
+            INSERT INTO taldau.silver_statistics_region (
                 indicator_id,
                 region_id,
                 region_name,
@@ -610,7 +610,7 @@ def taldau_pipeline():
                     cursor.execute(
                         """
                         SELECT COUNT(*)
-                        FROM silver.statistics_region
+                        FROM taldau.silver_statistics_region
                         WHERE indicator_id = %s;
                         """,
                         (indicator_id,)
@@ -634,7 +634,7 @@ def taldau_pipeline():
                     cursor.execute(
                         """
                         SELECT COUNT(*)
-                        FROM silver.statistics_region
+                        FROM taldau.silver_statistics_region
                         WHERE indicator_id = %s
                           AND (
                               region_id IS NULL
@@ -667,7 +667,7 @@ def taldau_pipeline():
                                 indicator_id,
                                 region_id,
                                 period_date
-                            FROM silver.statistics_region
+                            FROM taldau.silver_statistics_region
 
                             WHERE indicator_id = %s
 
@@ -743,7 +743,7 @@ def taldau_pipeline():
                 # =================================================
 
                 cursor.execute("""
-                    CREATE SCHEMA IF NOT EXISTS gold;
+                    CREATE SCHEMA IF NOT EXISTS taldau;
                 """)
 
                 # =================================================
@@ -751,7 +751,7 @@ def taldau_pipeline():
                 # =================================================
 
                 cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS gold.dim_region (
+                    CREATE TABLE IF NOT EXISTS taldau.gold_dim_region (
                         region_key BIGINT
                             GENERATED ALWAYS AS IDENTITY
                             PRIMARY KEY,
@@ -766,7 +766,7 @@ def taldau_pipeline():
                 """)
 
                 cursor.execute("""
-                    INSERT INTO gold.dim_region (
+                    INSERT INTO taldau.gold_dim_region (
                         source_region_id,
                         region_name
                     )
@@ -775,7 +775,7 @@ def taldau_pipeline():
                         region_id,
                         region_name
 
-                    FROM silver.statistics_region
+                    FROM taldau.silver_statistics_region
 
                     ON CONFLICT (source_region_id)
 
@@ -789,7 +789,7 @@ def taldau_pipeline():
                 # =================================================
 
                 cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS gold.dim_indicator (
+                    CREATE TABLE IF NOT EXISTS taldau.gold_dim_indicator (
                         indicator_key BIGINT
                             GENERATED ALWAYS AS IDENTITY
                             PRIMARY KEY,
@@ -813,7 +813,7 @@ def taldau_pipeline():
 
                 cursor.executemany(
                     """
-                    INSERT INTO gold.dim_indicator (
+                    INSERT INTO taldau.gold_dim_indicator (
                         source_indicator_id,
                         indicator_name
                     )
@@ -836,7 +836,7 @@ def taldau_pipeline():
                 # =================================================
 
                 cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS gold.dim_date (
+                    CREATE TABLE IF NOT EXISTS taldau.gold_dim_date (
                         date_key INTEGER PRIMARY KEY,
                         full_date DATE NOT NULL UNIQUE,
                         year INTEGER NOT NULL
@@ -844,7 +844,7 @@ def taldau_pipeline():
                 """)
 
                 cursor.execute("""
-                    INSERT INTO gold.dim_date (
+                    INSERT INTO taldau.gold_dim_date (
                         date_key,
                         full_date,
                         year
@@ -862,7 +862,7 @@ def taldau_pipeline():
                             YEAR FROM period_date
                         )::INTEGER
 
-                    FROM silver.statistics_region
+                    FROM taldau.silver_statistics_region
 
                     ON CONFLICT (date_key)
                     DO NOTHING;
@@ -874,7 +874,7 @@ def taldau_pipeline():
 
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS
-                        gold.fact_statistics (
+                        taldau.gold_fact_statistics (
 
                         indicator_key BIGINT NOT NULL,
                         region_key BIGINT NOT NULL,
@@ -894,19 +894,19 @@ def taldau_pipeline():
 
                         FOREIGN KEY (indicator_key)
                             REFERENCES
-                                gold.dim_indicator(
+                                taldau.gold_dim_indicator(
                                     indicator_key
                                 ),
 
                         FOREIGN KEY (region_key)
                             REFERENCES
-                                gold.dim_region(
+                                taldau.gold_dim_region(
                                     region_key
                                 ),
 
                         FOREIGN KEY (date_key)
                             REFERENCES
-                                gold.dim_date(
+                                taldau.gold_dim_date(
                                     date_key
                                 )
                     );
@@ -917,7 +917,7 @@ def taldau_pipeline():
                 # =================================================
 
                 cursor.execute("""
-                    INSERT INTO gold.fact_statistics (
+                    INSERT INTO taldau.gold_fact_statistics (
                         indicator_key,
                         region_key,
                         date_key,
@@ -930,17 +930,17 @@ def taldau_pipeline():
                         d.date_key,
                         s.value
 
-                    FROM silver.statistics_region s
+                    FROM taldau.silver_statistics_region s
 
-                    JOIN gold.dim_region r
+                    JOIN taldau.gold_dim_region r
                         ON s.region_id =
                            r.source_region_id
 
-                    JOIN gold.dim_indicator i
+                    JOIN taldau.gold_dim_indicator i
                         ON s.indicator_id =
                            i.source_indicator_id
 
-                    JOIN gold.dim_date d
+                    JOIN taldau.gold_dim_date d
                         ON s.period_date =
                            d.full_date
 
@@ -967,9 +967,9 @@ def taldau_pipeline():
                         i.source_indicator_id,
                         COUNT(*)
 
-                    FROM gold.fact_statistics f
+                    FROM taldau.gold_fact_statistics f
 
-                    JOIN gold.dim_indicator i
+                    JOIN taldau.gold_dim_indicator i
                         ON f.indicator_key =
                            i.indicator_key
 
@@ -1048,7 +1048,7 @@ def taldau_pipeline():
                     SELECT
                         indicator_id,
                         COUNT(*)
-                    FROM silver.statistics_region
+                    FROM taldau.silver_statistics_region
                     GROUP BY indicator_id
                     ORDER BY indicator_id;
                 """)
@@ -1075,9 +1075,9 @@ def taldau_pipeline():
                         i.source_indicator_id,
                         COUNT(*)
 
-                    FROM gold.fact_statistics f
+                    FROM taldau.gold_fact_statistics f
 
-                    JOIN gold.dim_indicator i
+                    JOIN taldau.gold_dim_indicator i
                         ON f.indicator_key =
                            i.indicator_key
 

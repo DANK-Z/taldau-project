@@ -37,20 +37,20 @@ Source IDs `19202525`, `19202537` содержат цифры 2025, но не я
 
 ## Модель и provenance
 
-008 добавляет nullable `year_start`, `year_end`, `reuse_snapshot_id` к `bronze.inv_snapshots`.
+008 добавляет nullable `year_start`, `year_end`, `reuse_snapshot_id` к `taldau.bronze_inv_snapshots`.
 Существующие строки не backfill-ятся: эффективные границы — `coalesce(year_start,year)` и
 `coalesce(year_end,year)`. Для новых snapshots `year=year_start`; диапазон ограничен 2023–2026.
 Indicator и endpoint остаются в frozen config. Scope и выбранный source нельзя поменять повторным prepare.
 
 При `prepare --reuse-snapshot-id SOURCE` source должен быть validated/published с точно тем же config.
-`bronze.inv_reuse_raw(snapshot_id,request_hash,raw_id)` фиксирует ссылки на эту версию.
+`taldau.bronze_inv_reuse_raw(snapshot_id,request_hash,raw_id)` фиксирует ссылки на эту версию.
 Не выбирается случайный «самый новый» ответ из всей истории. Конфликтующие версии одного запроса
 в source блокируют prepare. Raw JSON, response_text и исходный run_id не копируются и не изменяются.
 Constraint `UNIQUE(run_id,request_hash)` остаётся на месте.
 
 Loader сначала проверяет свой checkpoint, затем собственный raw, затем frozen reuse reference.
 Проверяются hash, endpoint, canonical params, indicator, period type, dimension и tree_depth.
-Успешный checkpoint нового run ссылается на прежний raw_id. `bronze.inv_run_raw` даёт логический
+Успешный checkpoint нового run ссылается на прежний raw_id. `taldau.bronze_inv_run_raw` даёт логический
 run_id нового обхода и отдельный `source_run_id` физического raw. Staging/coverage читают это view,
 а Silver/Gold сохраняют исходный `source_raw_id`. Любой факт прослеживается до original response.
 Новый snapshot получает собственные discovery inventory, chunks, leases и checkpoints.
@@ -76,7 +76,7 @@ Reporting-period IDs извлекаются из JSON, не из ETS expectation
 Months coverage показывается отдельно по каждому году. Отсутствие месяца в response не делает
 HTTP-запрос missing: повторить тот же запрос для получения более свежей версии — отдельное решение.
 
-`quality.inv_year_coverage` хранит логику observed coverage в view над сохранённым staging:
+`taldau.quality_inv_year_coverage` хранит логику observed coverage в view над сохранённым staging:
 year, period_codes, months_present, available_through, numeric_rows, x_rows, warning.
 Dashboard/API может прочитать её по опубликованному snapshot. Полный список кодов позволяет
 отличить январь–август от ряда с пропусками; один available_through этого не доказывает.
@@ -180,10 +180,12 @@ diagnostics, даже при успешной загрузке. Уже validated
 * `TALDAU_REPORT_DIR` — каталог для DAG reports, default `/opt/airflow/data/reports`.
   Workers должны иметь права записи и общий persistent storage при распределённом executor.
   Локально используется существующий `data` volume. CLI `--output` задаёт путь отдельно.
-* На чистой DWH применить `python tools/run_investments_elt.py migrate-bronze`,
+* Single-schema layout и production mapping описаны в `README_SINGLE_SCHEMA.md`.
+  На чистой DWH применить `python tools/run_investments_elt.py migrate-bronze`,
   затем `python tools/run_investments_elt.py migrate-silver`,
-  затем `python tools/manage_investments_snapshot.py migrate` (004–008 одной транзакцией).
-  На текущей схеме достаточно последней команды. Миграции повторяемые, не запускают HTTP/publish.
+  затем `python tools/manage_investments_snapshot.py migrate` (009 compatibility step перед
+  актуальными 004–008, одной транзакцией). На legacy 001–008 installation достаточно последней
+  команды. Миграции повторяемые, не запускают HTTP/publish.
 * Для reuse перенести source snapshot с его Bronze, request tasks и control plane из согласованного
   backup. Без этих raw серверный plan покажет missing; само наличие Silver/Gold не заменяет Bronze.
   Далее audit → prepare → coverage → reuse либо разрешённый launch → validate → diagnostics → manual publish.

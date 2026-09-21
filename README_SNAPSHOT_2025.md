@@ -46,7 +46,7 @@ DAG не имеет расписания, `allow_extraction` по умолчан
 | `README_SNAPSHOT_2025.md` | Эта инструкция |
 
 Старый `taldau_pipeline`, его metadata/region_metric таблицы, пилотный DAG, migrations 001–003,
-docker-compose, credentials и порты сохранены. В `silver.inv_fixed_assets` добавлен nullable
+docker-compose, credentials и порты сохранены. В `taldau.silver_inv_fixed_assets` добавлен nullable
 `source_snapshot_id`; прежние pilot INSERT с явным списком полей совместимы.
 Перед миграциями создан backup: `data/backups/20260917_210927_snapshot/before_snapshot_schema.dump`.
 
@@ -84,8 +84,8 @@ Silver -> Gold за весь 2025 в ОДНОЙ транзакции
 последующее изменение metadata не меняет уже созданную версию. Новый snapshot_id нужен для новой
 публикации источника. Текущий код ограничен indicator 701827 / period 8 / year 2025.
 
-`bronze.inv_snapshots` хранит config, discovery_run_id, ожидаемое число chunks, state и timestamps.
-`bronze.inv_chunks` хранит territory_id, постоянный run_id, state, attempt, lease/heartbeat,
+`taldau.bronze_inv_snapshots` хранит config, discovery_run_id, ожидаемое число chunks, state и timestamps.
+`taldau.bronze_inv_chunks` хранит territory_id, постоянный run_id, state, attempt, lease/heartbeat,
 raw_count, staged_at, completed_at, last_error. Статусы chunk: queued / running / complete / failed.
 
 Пример структуры chunk перед обработкой:
@@ -106,8 +106,8 @@ raw_count, staged_at, completed_at, last_error. Статусы chunk: queued / r
 
 ## Checkpoint и resume
 
-`bronze.inv_request_tasks` регистрирует точные параметры запроса до HTTP. После транзакционной записи
-полного ответа в `bronze.taldau_api_raw` связывает checkpoint с raw_id. Raw text/JSONB остаются
+`taldau.bronze_inv_request_tasks` регистрирует точные параметры запроса до HTTP. После транзакционной записи
+полного ответа в `taldau.bronze_taldau_api_raw` связывает checkpoint с raw_id. Raw text/JSONB остаются
 исходными; `x`, parent nodes и данные вне 2025 в них сохраняются.
 
 Стабильный run_id territory chunk использует прежний ключ `UNIQUE(run_id,request_hash)`.
@@ -140,21 +140,21 @@ Failed snapshot возобновляется явным повторным launc
 
 ## SQL-преобразование и validation
 
-`staging.stage_inv_chunk(chunk_id)`:
+`taldau.staging_stage_inv_chunk(chunk_id)`:
 
-1. Сохраняет observed hierarchy в `bronze.inv_snapshot_members` из raw response + request context.
+1. Сохраняет observed hierarchy в `taldau.bronze_inv_snapshot_members` из raw response + request context.
 2. Находит реально присутствующие `yMM2025` и `MM2025` через `jsonb_object_keys`.
-3. Сохраняет пары и orphan keys в `staging.inv_year_cells`, включая raw_value=`x`.
+3. Сохраняет пары и orphan keys в `taldau.staging_inv_year_cells`, включая raw_value=`x`.
 4. Преобразует числовые значения в точный PostgreSQL NUMERIC. Python не преобразует факты.
 
 Не создаются декартовы произведения измерений/месяцев. Staging сохраняет дубли для обнаружения,
 а не скрывает их через UPSERT. Пара без второй половины — ошибка validation.
 
 ```sql
-SELECT quality.validate_inv_snapshot('kz-investments-2025-v1');
+SELECT taldau.quality_validate_inv_snapshot('kz-investments-2025-v1');
 
 SELECT check_name, violations
-FROM quality.inv_snapshot_checks
+FROM taldau.quality_inv_snapshot_checks
 WHERE snapshot_id='kz-investments-2025-v1'
 ORDER BY check_name;
 ```
@@ -178,10 +178,10 @@ ORDER BY check_name;
 Полный путь: **extract → stage → validate → diagnostics → manual publish → Silver → Gold**.
 Годовой DAG заканчивается на diagnostics; автоматической публикации нет.
 
-`publish_snapshot(conn, snapshot_id) -> int` вызывает `silver.publish_inv_snapshot(text)`, затем
-`gold.publish_inv_snapshot(text)` в одной транзакции и проверяет равенство возвращённых counts.
+`publish_snapshot(conn, snapshot_id) -> int` вызывает `taldau.silver_publish_inv_snapshot(text)`, затем
+`taldau.gold_publish_inv_snapshot(text)` в одной транзакции и проверяет равенство возвращённых counts.
 Публикация повторяет validation, берёт общий с пилотом advisory lock
-`silver.inv_fixed_assets:pilot`, заменяет только indicator/year snapshot и сверяет ключи/значения
+`taldau.silver_inv_fixed_assets:pilot`, заменяет только indicator/year snapshot и сверяет ключи/значения
 staging ↔ Silver и Silver ↔ Gold в обе стороны через EXCEPT. Gold использует source IDs и surrogate
 member_key; повторяющиеся члены snapshot дедуплицируются по `(dimension,member_id)` после проверки
 конфликтов иерархии. Отсутствующий member любого из четырёх измерений блокирует Gold, даже если
@@ -202,12 +202,12 @@ Gold-функция требует `state='published'`: это подтверж�
 
 ```sql
 SELECT period_code,reporting_period,numeric_rows,x_rows,invalid_rows,expected_rows,delta
-FROM quality.inv_month_diagnostics
+FROM taldau.quality_inv_month_diagnostics
 WHERE snapshot_id='kz-investments-2025-v1'
 ORDER BY right(period_code,4),left(period_code,2),reporting_period;
 ```
 
-Ожидания ETS загружены в `quality.inv_month_expectations`:
+Ожидания ETS загружены в `taldau.quality_inv_month_expectations`:
 
 | reporting_period | Месяц | rows |
 |---|---|---:|
@@ -232,14 +232,14 @@ ORDER BY right(period_code,4),left(period_code,2),reporting_period;
 ```sql
 -- Территории без фактов за 2025: повод посмотреть raw, а не создать фиктивные комбинации.
 SELECT c.chunk_id,c.territory_id,c.state,count(v.value) AS numeric_rows
-FROM bronze.inv_chunks c LEFT JOIN staging.inv_year_cells v USING(chunk_id)
+FROM taldau.bronze_inv_chunks c LEFT JOIN taldau.staging_inv_year_cells v USING(chunk_id)
 WHERE c.snapshot_id='kz-investments-2025-v1'
 GROUP BY 1,2,3 HAVING count(v.value)=0;
 
 -- Дубли с указанием raw-источников.
 SELECT indicator_id,reporting_period,kato_id,krp_id,sif_id,gsvziok_id,
        count(*),array_agg(raw_id) AS raw_ids
-FROM staging.inv_year_cells WHERE snapshot_id='kz-investments-2025-v1'
+FROM taldau.staging_inv_year_cells WHERE snapshot_id='kz-investments-2025-v1'
 GROUP BY 1,2,3,4,5,6 HAVING count(*)>1;
 ```
 
@@ -249,33 +249,33 @@ GROUP BY 1,2,3,4,5,6 HAVING count(*)>1;
 вызове capture; миграции от наличия ETS не зависят. Для нового ETS baseline:
 
 ```sql
-SELECT reconciliation.capture_inv_ets(
+SELECT taldau.reconciliation_capture_inv_ets(
   'ets-2025-baseline-v1','public.bns_inv_fixed_assets'::regclass,2025
 );
 ```
 
-Capture одной SQL-командой сохраняет неизменённые строки в `reconciliation.ets_inv_raw`, фиксируя
+Capture одной SQL-командой сохраняет неизменённые строки в `taldau.reconciliation_ets_inv_raw`, фиксируя
 версию сравнения. Исходный space_element_set_id остаётся в этих строках; в Direct Taldau он не придуман.
 Для новой версии ETS нужно новое dataset_id.
 
 До сравнения необходимо проверить семантику `kato1`, `krp`, `sif`, `gsvziok` и заполнить
-`reconciliation.ets_inv_key_map` подтверждёнными соответствиями **ETS technical key → Taldau source ID**,
+`taldau.reconciliation_ets_inv_key_map` подтверждёнными соответствиями **ETS technical key → Taldau source ID**,
 с evidence для каждого mapping. Одинаковый числовой вид не является доказательством равенства ID.
 Если поля ETS содержат только display names, сначала потребуется исходный справочник ETS с technical IDs
 и соответствующая доработка adapter; по названиям ключи не угадываются.
 
 ```sql
 -- Поля, для которых ещё нет подтверждённого mapping.
-SELECT row_id,source_row FROM reconciliation.v_ets_inv_resolved
+SELECT row_id,source_row FROM taldau.reconciliation_v_ets_inv_resolved
 WHERE dataset_id='ets-2025-baseline-v1'
   AND (kato_id IS NULL OR krp_id IS NULL OR sif_id IS NULL OR gsvziok_id IS NULL)
 LIMIT 20;
 
-SELECT reconciliation.compare_inv_ets('kz-investments-2025-v1','ets-2025-baseline-v1');
-SELECT * FROM reconciliation.inv_results
+SELECT taldau.reconciliation_compare_inv_ets('kz-investments-2025-v1','ets-2025-baseline-v1');
+SELECT * FROM taldau.reconciliation_inv_results
 WHERE snapshot_id='kz-investments-2025-v1' AND dataset_id='ets-2025-baseline-v1'
 ORDER BY reporting_period;
-SELECT * FROM reconciliation.inv_differences
+SELECT * FROM taldau.reconciliation_inv_differences
 WHERE snapshot_id='kz-investments-2025-v1' AND dataset_id='ets-2025-baseline-v1'
 ORDER BY reporting_period,kato_id,krp_id,sif_id,gsvziok_id;
 ```
@@ -381,7 +381,7 @@ diagnostic-only counts и FULL OUTER JOIN на синтетическом ETS. �
 по counts и natural keys + values, повторный publish, сохранение другого года, missing member,
 отказ Gold до публикации Silver, повторная validation, SQL row loss и mismatch с откатом обоих слоёв,
 Python count mismatch с откатом, обратная совместимость CLI. Pilot SQL проверяется существующим
-тестом точного NUMERIC и `gold.refresh_inv_pilot`; оба WHERE в EXCEPT корректны.
+тестом точного NUMERIC и `taldau.gold_refresh_inv_pilot`; оба WHERE в EXCEPT корректны.
 
 Проверка изменения Gold-публикации 18.09.2026: **32 теста прошли**, без пропусков,
 на отдельном PostgreSQL 17; годовые миграции успешно применены дважды. Рабочий snapshot

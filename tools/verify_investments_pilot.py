@@ -31,7 +31,7 @@ def verify(conn, run_id, reference):
             cur.execute('''SELECT count(*) FROM (SELECT krp_id,sif_id,gsvziok_id,reporting_period
                 FROM pilot_reference GROUP BY 1,2,3,4 HAVING count(*)>1) d''')
             report['reference_duplicates'] = cur.fetchone()[0]
-            cur.execute('''WITH s AS (SELECT * FROM silver.inv_fixed_assets WHERE source_run_id=%s)
+            cur.execute('''WITH s AS (SELECT * FROM taldau.silver_inv_fixed_assets WHERE source_run_id=%s)
                 SELECT count(*) FILTER(WHERE s.krp_id IS NULL),
                        count(*) FILTER(WHERE r.krp_id IS NULL),
                        count(*) FILTER(WHERE s.krp_id IS NOT NULL AND r.krp_id IS NOT NULL AND s.value<>r.value),
@@ -39,11 +39,11 @@ def verify(conn, run_id, reference):
                 FROM pilot_reference r FULL JOIN s USING(krp_id,sif_id,gsvziok_id,reporting_period)''',(run_id,))
             missing,extra,mismatch,matched = cur.fetchone()
             report.update(reference_missing=missing,reference_extra=extra,reference_value_mismatch=mismatch,reference_matched=matched)
-            cur.execute('''SELECT value FROM silver.inv_fixed_assets
+            cur.execute('''SELECT value FROM taldau.silver_inv_fixed_assets
                 WHERE source_run_id=%s AND kato_id=268012 AND krp_id=741927
                 AND sif_id=807855 AND gsvziok_id=19202537 AND reporting_period=1069''',(run_id,))
             report['control_value'] = str(cur.fetchone()[0])
-            cur.execute('SELECT count(*),sum(octet_length(response_text)),count(DISTINCT request_hash) FROM bronze.taldau_api_raw WHERE run_id=%s',(run_id,))
+            cur.execute('SELECT count(*),sum(octet_length(response_text)),count(DISTINCT request_hash) FROM taldau.bronze_taldau_api_raw WHERE run_id=%s',(run_id,))
             count, size, unique = cur.fetchone()
             report.update(bronze_responses=count,bronze_response_bytes=size,bronze_unique_requests=unique)
             cur.execute("SELECT to_regclass('public.bns_inv_fixed_assets') IS NOT NULL")

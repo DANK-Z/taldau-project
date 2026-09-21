@@ -37,11 +37,12 @@ class PublishCliTests(unittest.TestCase):
              patch.object(cli,'db_connection',return_value=conn), contextlib.redirect_stdout(output):
             cli.main()
         result=json.loads(output.getvalue())
+        self.assertEqual(result['migrations'][0],'009_single_taldau_schema.sql')
         self.assertEqual(result['migrations'][-1],'008_multi_year_snapshot.sql')
         self.assertEqual(result['http_requests'],0)
         executed=conn.cursor.return_value.__enter__.return_value.execute.call_args_list
         self.assertEqual(len(executed),len(result['migrations']))
-        self.assertIn('CREATE OR REPLACE FUNCTION gold.publish_inv_snapshot',executed[-2].args[0])
+        self.assertIn('CREATE OR REPLACE FUNCTION taldau.gold_publish_inv_snapshot',executed[-2].args[0])
         self.assertIn('year_start',executed[-1].args[0])
 
 

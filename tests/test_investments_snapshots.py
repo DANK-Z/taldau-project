@@ -60,14 +60,14 @@ class SnapshotTests(unittest.TestCase):
         result=discover_territories(self.conn,self.sid)
         self.assertEqual(result['chunks'],2)
         with self.conn.cursor() as cur:
-            cur.execute('SELECT territory_id,chunk_id,run_id FROM bronze.inv_chunks WHERE snapshot_id=%s',(self.sid,))
+            cur.execute('SELECT territory_id,chunk_id,run_id FROM taldau.bronze_inv_chunks WHERE snapshot_id=%s',(self.sid,))
             self.chunks={row[0]:(row[1],row[2]) for row in cur.fetchall()}
-            cur.execute('''INSERT INTO bronze.taldau_api_raw
+            cur.execute('''INSERT INTO taldau.bronze_taldau_api_raw
                 (run_id,indicator_id,endpoint,period_id,request_params,request_hash,response_data,
                  response_text,response_hash,http_status,dimension,tree_depth)
                 SELECT %s,indicator_id,endpoint,period_id,request_params,request_hash,response_data,
                     response_text,response_hash,http_status,dimension,tree_depth
-                FROM bronze.taldau_api_raw WHERE run_id='astana-2025-12-pilot-v1' AND dimension<>'kato' ''',
+                FROM taldau.bronze_taldau_api_raw WHERE run_id='astana-2025-12-pilot-v1' AND dimension<>'kato' ''',
                 (self.chunks[268012][1],))
         self.insert_raw(self.chunks[741880][1],'krp',terms,'',[],0)
 
@@ -81,7 +81,7 @@ class SnapshotTests(unittest.TestCase):
         params=tree_params(self.config,terms,dimension,parent)
         body=json.dumps(nodes,ensure_ascii=False)
         with self.conn.cursor() as cur:
-            cur.execute('''INSERT INTO bronze.taldau_api_raw
+            cur.execute('''INSERT INTO taldau.bronze_taldau_api_raw
                 (run_id,indicator_id,endpoint,period_id,request_params,request_hash,response_data,response_text,
                  response_hash,http_status,dimension,tree_depth)
                 VALUES(%s,701827,%s,8,%s,%s,%s::jsonb,%s,%s,200,%s,%s)''',
@@ -94,9 +94,9 @@ class SnapshotTests(unittest.TestCase):
 
     def checks(self):
         with self.conn.cursor() as cur:
-            cur.execute('SELECT quality.validate_inv_snapshot(%s)',(self.sid,))
+            cur.execute('SELECT taldau.quality_validate_inv_snapshot(%s)',(self.sid,))
             result=cur.fetchone()[0]
-            cur.execute('SELECT check_name,violations FROM quality.inv_snapshot_checks WHERE snapshot_id=%s AND violations>0',(self.sid,))
+            cur.execute('SELECT check_name,violations FROM taldau.quality_inv_snapshot_checks WHERE snapshot_id=%s AND violations>0',(self.sid,))
             return result,dict(cur.fetchall())
 
     def test_full_year_sql_and_atomic_publication_ignore_diagnostic_count(self):
@@ -107,13 +107,13 @@ class SnapshotTests(unittest.TestCase):
         published=publish_snapshot(self.conn,self.sid)
         self.assertEqual(published,result['numeric_rows'])
         with self.conn.cursor() as cur:
-            cur.execute('''SELECT count(*) FROM silver.inv_fixed_assets
+            cur.execute('''SELECT count(*) FROM taldau.silver_inv_fixed_assets
                 WHERE source_snapshot_id=%s AND kato_id=268012 AND reporting_period=1069''',(self.sid,))
             self.assertEqual(cur.fetchone()[0],504)
             cur.execute('''SELECT count(DISTINCT period_code),count(*) FILTER(WHERE raw_value='x' AND period_code='122025')
-                FROM staging.inv_year_cells WHERE snapshot_id=%s''',(self.sid,))
+                FROM taldau.staging_inv_year_cells WHERE snapshot_id=%s''',(self.sid,))
             self.assertEqual(cur.fetchone(),(12,7))
-            cur.execute('SELECT count(*) FROM quality.inv_month_diagnostics WHERE snapshot_id=%s',(self.sid,))
+            cur.execute('SELECT count(*) FROM taldau.quality_inv_month_diagnostics WHERE snapshot_id=%s',(self.sid,))
             self.assertEqual(cur.fetchone()[0],12)
 
     def test_validation_and_summary_stop_before_silver_publication(self):
@@ -139,9 +139,9 @@ class SnapshotTests(unittest.TestCase):
             write_summary(report,output)
             self.assertEqual(json.loads(output.read_text(encoding='utf-8')),report)
         with self.conn.cursor() as cur:
-            cur.execute("SELECT count(*) FROM silver.inv_fixed_assets WHERE source_run_id='astana-2025-12-pilot-v1'")
+            cur.execute("SELECT count(*) FROM taldau.silver_inv_fixed_assets WHERE source_run_id='astana-2025-12-pilot-v1'")
             self.assertEqual(cur.fetchone()[0],504)
-            cur.execute('SELECT count(*) FROM silver.inv_fixed_assets WHERE source_snapshot_id=%s',(self.sid,))
+            cur.execute('SELECT count(*) FROM taldau.silver_inv_fixed_assets WHERE source_snapshot_id=%s',(self.sid,))
             self.assertEqual(cur.fetchone()[0],0)
         # Only this explicit call publishes; summaries themselves are read-only.
         publish_snapshot(self.conn,self.sid)
@@ -151,11 +151,11 @@ class SnapshotTests(unittest.TestCase):
         """Include values, provenance and timestamps to detect partial writes on failure."""
         with self.conn.cursor() as cur:
             result=[]
-            for table in ('silver.inv_fixed_assets','gold.fact_inv_fixed_assets',
-                          'gold.dim_inv_member','gold.dim_inv_period'):
+            for table in ('taldau.silver_inv_fixed_assets','taldau.gold_fact_inv_fixed_assets',
+                          'taldau.gold_dim_inv_member','taldau.gold_dim_inv_period'):
                 cur.execute('SELECT row_to_json(t)::text FROM '+table+' t ORDER BY 1')
                 result.append(cur.fetchall())
-            cur.execute('SELECT state,published_at FROM bronze.inv_snapshots WHERE snapshot_id=%s',(self.sid,))
+            cur.execute('SELECT state,published_at FROM taldau.bronze_inv_snapshots WHERE snapshot_id=%s',(self.sid,))
             result.append(cur.fetchone())
             return result
 
@@ -164,22 +164,22 @@ class SnapshotTests(unittest.TestCase):
         expected=validate_snapshot(self.conn,self.sid)['numeric_rows']
         with self.conn.cursor() as cur:
             # Existing facts outside the target year must survive publication.
-            cur.execute('''INSERT INTO gold.dim_inv_period
+            cur.execute('''INSERT INTO taldau.gold_dim_inv_period
                 SELECT indicator_id,-2024,'122024','2024-01-01','2024-12-31',period_type
-                FROM gold.dim_inv_period LIMIT 1''')
-            cur.execute('''INSERT INTO gold.fact_inv_fixed_assets
+                FROM taldau.gold_dim_inv_period LIMIT 1''')
+            cur.execute('''INSERT INTO taldau.gold_fact_inv_fixed_assets
                 (indicator_id,reporting_period,kato_key,krp_key,sif_key,gsvziok_key,value,value_measure,source_run_id,source_raw_id)
                 SELECT indicator_id,-2024,kato_key,krp_key,sif_key,gsvziok_key,value,value_measure,source_run_id,source_raw_id
-                FROM gold.fact_inv_fixed_assets LIMIT 1''')
+                FROM taldau.gold_fact_inv_fixed_assets LIMIT 1''')
         first=None
         for _ in range(2):
             self.assertEqual(publish_snapshot(self.conn,self.sid),expected)
             with self.conn.cursor() as cur:
                 cur.execute('''SELECT indicator_id,reporting_period,kato_id,krp_id,sif_id,gsvziok_id,value
-                    FROM silver.inv_fixed_assets WHERE source_snapshot_id=%s ORDER BY 1,2,3,4,5,6''',(self.sid,))
+                    FROM taldau.silver_inv_fixed_assets WHERE source_snapshot_id=%s ORDER BY 1,2,3,4,5,6''',(self.sid,))
                 silver=cur.fetchall()
                 cur.execute('''SELECT indicator_id,reporting_period,kato_id,krp_id,sif_id,gsvziok_id,value
-                    FROM gold.v_inv_fixed_assets WHERE indicator_id=701827
+                    FROM taldau.gold_v_inv_fixed_assets WHERE indicator_id=701827
                     AND extract(year FROM start_date)=2025 ORDER BY 1,2,3,4,5,6''')
                 gold=cur.fetchall()
                 self.assertEqual(len(gold),expected)
@@ -187,7 +187,7 @@ class SnapshotTests(unittest.TestCase):
                 self.assertEqual(len({row[:-1] for row in gold}),expected)
                 if first is not None: self.assertEqual(gold,first)
                 first=gold
-                cur.execute('SELECT count(*) FROM gold.fact_inv_fixed_assets WHERE reporting_period=-2024')
+                cur.execute('SELECT count(*) FROM taldau.gold_fact_inv_fixed_assets WHERE reporting_period=-2024')
                 self.assertEqual(cur.fetchone()[0],1)
 
     def test_gold_failure_rolls_back_silver_gold_and_snapshot_state(self):
@@ -198,7 +198,7 @@ class SnapshotTests(unittest.TestCase):
         with self.conn.cursor() as cur:
             cur.execute('''CREATE FUNCTION pg_temp.corrupt_gold() RETURNS trigger LANGUAGE plpgsql AS $$
                 BEGIN NEW.value:=NEW.value+1; RETURN NEW; END $$''')
-            cur.execute('''CREATE TRIGGER test_corrupt_gold BEFORE INSERT ON gold.fact_inv_fixed_assets
+            cur.execute('''CREATE TRIGGER test_corrupt_gold BEFORE INSERT ON taldau.gold_fact_inv_fixed_assets
                 FOR EACH ROW EXECUTE FUNCTION pg_temp.corrupt_gold()''')
         with self.assertRaisesRegex(psycopg2.Error,'Gold/Silver snapshot mismatch'):
             publish_snapshot(self.conn,self.sid)
@@ -211,7 +211,7 @@ class SnapshotTests(unittest.TestCase):
         with self.conn.cursor() as cur:
             cur.execute('''CREATE FUNCTION pg_temp.skip_gold() RETURNS trigger LANGUAGE plpgsql AS $$
                 BEGIN RETURN NULL; END $$''')
-            cur.execute('''CREATE TRIGGER test_skip_gold BEFORE INSERT ON gold.fact_inv_fixed_assets
+            cur.execute('''CREATE TRIGGER test_skip_gold BEFORE INSERT ON taldau.gold_fact_inv_fixed_assets
                 FOR EACH ROW EXECUTE FUNCTION pg_temp.skip_gold()''')
         with self.assertRaisesRegex(psycopg2.Error,'Gold row loss'):
             publish_snapshot(self.conn,self.sid)
@@ -221,14 +221,14 @@ class SnapshotTests(unittest.TestCase):
         self.complete()
         publish_snapshot(self.conn,self.sid)
         with self.conn.cursor() as cur:
-            cur.execute('''DELETE FROM bronze.inv_snapshot_members WHERE snapshot_id=%s AND dimension='gsvziok'
-                AND member_id=(SELECT min(gsvziok_id) FROM silver.inv_fixed_assets WHERE source_snapshot_id=%s)''',
+            cur.execute('''DELETE FROM taldau.bronze_inv_snapshot_members WHERE snapshot_id=%s AND dimension='gsvziok'
+                AND member_id=(SELECT min(gsvziok_id) FROM taldau.silver_inv_fixed_assets WHERE source_snapshot_id=%s)''',
                 (self.sid,self.sid))
         before=self.publication_image()
         with self.assertRaisesRegex(psycopg2.Error,'incomplete/invalid'):
             with self.conn:
                 with self.conn.cursor() as cur:
-                    cur.execute('SELECT gold.publish_inv_snapshot(%s)',(self.sid,))
+                    cur.execute('SELECT taldau.gold_publish_inv_snapshot(%s)',(self.sid,))
         self.assertEqual(self.publication_image(),before)
         with self.assertRaisesRegex(psycopg2.Error,'incomplete/invalid'):
             publish_snapshot(self.conn,self.sid)
@@ -240,15 +240,15 @@ class SnapshotTests(unittest.TestCase):
         with self.assertRaisesRegex(psycopg2.Error,'must be published in Silver'):
             with self.conn:
                 with self.conn.cursor() as cur:
-                    cur.execute('SELECT gold.publish_inv_snapshot(%s)',(self.sid,))
+                    cur.execute('SELECT taldau.gold_publish_inv_snapshot(%s)',(self.sid,))
         publish_snapshot(self.conn,self.sid)
         with self.conn.cursor() as cur:
-            cur.execute("UPDATE staging.inv_year_cells SET value=NULL,raw_value='bad' WHERE snapshot_id=%s",(self.sid,))
+            cur.execute("UPDATE taldau.staging_inv_year_cells SET value=NULL,raw_value='bad' WHERE snapshot_id=%s",(self.sid,))
         before=self.publication_image()
         with self.assertRaisesRegex(psycopg2.Error,'incomplete/invalid'):
             with self.conn:
                 with self.conn.cursor() as cur:
-                    cur.execute('SELECT gold.publish_inv_snapshot(%s)',(self.sid,))
+                    cur.execute('SELECT taldau.gold_publish_inv_snapshot(%s)',(self.sid,))
         self.assertEqual(self.publication_image(),before)
 
     def test_python_count_mismatch_rolls_back_both_layers(self):
@@ -256,7 +256,7 @@ class SnapshotTests(unittest.TestCase):
         validate_snapshot(self.conn,self.sid)
         before=self.publication_image()
         with self.conn.cursor() as cur:
-            cur.execute('''CREATE OR REPLACE FUNCTION gold.publish_inv_snapshot(p_snapshot text)
+            cur.execute('''CREATE OR REPLACE FUNCTION taldau.gold_publish_inv_snapshot(p_snapshot text)
                 RETURNS bigint LANGUAGE sql AS 'SELECT 0::bigint' ''')
         with self.assertRaisesRegex(ValueError,'publication count mismatch'):
             publish_snapshot(self.conn,self.sid)
@@ -269,7 +269,7 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(report['numeric_rows'],0)
         self.complete()
         with self.conn.cursor() as cur:
-            cur.execute('''UPDATE staging.inv_year_cells SET value=NULL,raw_value='unknown'
+            cur.execute('''UPDATE taldau.staging_inv_year_cells SET value=NULL,raw_value='unknown'
                 WHERE snapshot_id=%s AND period_code='122025' ''',(self.sid,))
         with self.assertRaisesRegex(ValueError,'validation failed'):
             validate_snapshot(self.conn,self.sid)
@@ -285,7 +285,7 @@ class SnapshotTests(unittest.TestCase):
         with self.assertRaisesRegex(psycopg2.Error,'incomplete/invalid'):
             publish_snapshot(self.conn,self.sid)
         with self.conn.cursor() as cur:
-            cur.execute("SELECT count(*) FROM silver.inv_fixed_assets WHERE source_run_id='astana-2025-12-pilot-v1'")
+            cur.execute("SELECT count(*) FROM taldau.silver_inv_fixed_assets WHERE source_run_id='astana-2025-12-pilot-v1'")
             self.assertEqual(cur.fetchone()[0],504)
 
     def test_resume_skips_completed_and_reclaims_dead_worker(self):
@@ -293,7 +293,7 @@ class SnapshotTests(unittest.TestCase):
         country=self.chunks[741880][0]
         extract_chunk(self.conn,astana)
         with self.conn.cursor() as cur:
-            cur.execute("UPDATE bronze.inv_chunks SET state='running',lease_until=now()-interval '1 minute' WHERE chunk_id=%s",(country,))
+            cur.execute("UPDATE taldau.bronze_inv_chunks SET state='running',lease_until=now()-interval '1 minute' WHERE chunk_id=%s",(country,))
         self.assertEqual(pending_chunk_ids(self.conn,self.sid),[country])
         self.assertTrue(extract_chunk(self.conn,astana)['already_complete'])
         self.assertEqual(extract_chunk(self.conn,country)['http_requests'],0)
@@ -301,7 +301,7 @@ class SnapshotTests(unittest.TestCase):
 
     def test_active_lease_blocks_resume(self):
         with self.conn.cursor() as cur:
-            cur.execute("UPDATE bronze.inv_chunks SET state='running',lease_until=now()+interval '1 hour' WHERE chunk_id=%s",(self.chunks[268012][0],))
+            cur.execute("UPDATE taldau.bronze_inv_chunks SET state='running',lease_until=now()+interval '1 hour' WHERE chunk_id=%s",(self.chunks[268012][0],))
         with self.assertRaisesRegex(RuntimeError,'live lease'):
             pending_chunk_ids(self.conn,self.sid)
 
@@ -318,10 +318,10 @@ class SnapshotTests(unittest.TestCase):
 
     def test_wave_is_bounded_and_completed_chunks_are_not_remapped(self):
         with self.conn.cursor() as cur:
-            cur.execute('''INSERT INTO bronze.extraction_runs(run_id,pipeline_id,config,scope)
+            cur.execute('''INSERT INTO taldau.bronze_extraction_runs(run_id,pipeline_id,config,scope)
                 SELECT %s||':extra:'||n,'inv_fixed_assets_monthly',%s,'{}'::jsonb
                 FROM generate_series(1,140) n''',(self.sid,Json(self.config)))
-            cur.execute('''INSERT INTO bronze.inv_chunks(snapshot_id,territory_id,run_id)
+            cur.execute('''INSERT INTO taldau.bronze_inv_chunks(snapshot_id,territory_id,run_id)
                 SELECT %s,9000000+n,%s||':extra:'||n FROM generate_series(1,140) n''',(self.sid,self.sid))
         self.assertEqual(len(pending_chunk_ids(self.conn,self.sid)),128)
         with self.assertRaisesRegex(ValueError,'Maximum wave size'):
@@ -333,8 +333,8 @@ class SnapshotTests(unittest.TestCase):
     def test_duplicate_and_null_keys_block_publication(self):
         self.complete()
         with self.conn.cursor() as cur:
-            cur.execute('''UPDATE staging.inv_year_cells SET reporting_period=NULL WHERE snapshot_id=%s
-                AND raw_id=(SELECT min(raw_id) FROM staging.inv_year_cells WHERE snapshot_id=%s)''',(self.sid,self.sid))
+            cur.execute('''UPDATE taldau.staging_inv_year_cells SET reporting_period=NULL WHERE snapshot_id=%s
+                AND raw_id=(SELECT min(raw_id) FROM taldau.staging_inv_year_cells WHERE snapshot_id=%s)''',(self.sid,self.sid))
         result,errors=self.checks()
         self.assertFalse(result['valid'])
         self.assertGreater(errors['null_keys'],0)
@@ -342,11 +342,11 @@ class SnapshotTests(unittest.TestCase):
     def test_duplicate_grain_not_silently_deduplicated(self):
         self.complete()
         with self.conn.cursor() as cur:
-            cur.execute('''INSERT INTO staging.inv_year_cells
+            cur.execute('''INSERT INTO taldau.staging_inv_year_cells
                 SELECT snapshot_id,chunk_id,run_id,raw_id,node_ordinal+10000,indicator_id,
                     kato_id,krp_id,sif_id,gsvziok_id,period_code,reporting_period,reporting_period_text,
                     has_value,has_period,raw_value,value,value_measure
-                FROM staging.inv_year_cells WHERE snapshot_id=%s LIMIT 1''',(self.sid,))
+                FROM taldau.staging_inv_year_cells WHERE snapshot_id=%s LIMIT 1''',(self.sid,))
         result,errors=self.checks()
         self.assertFalse(result['valid'])
         self.assertEqual(errors['duplicate_natural_keys'],1)
@@ -354,7 +354,7 @@ class SnapshotTests(unittest.TestCase):
     def test_unknown_value_and_orphan_pairs_block_publication(self):
         self.complete()
         with self.conn.cursor() as cur:
-            cur.execute('''UPDATE staging.inv_year_cells SET raw_value='unexpected',value=NULL,has_period=false
+            cur.execute('''UPDATE taldau.staging_inv_year_cells SET raw_value='unexpected',value=NULL,has_period=false
                 WHERE snapshot_id=%s AND period_code='122025' ''',(self.sid,))
         result,errors=self.checks()
         self.assertFalse(result['valid'])
@@ -364,8 +364,8 @@ class SnapshotTests(unittest.TestCase):
     def test_hierarchy_conflict_blocks_publication(self):
         self.complete()
         with self.conn.cursor() as cur:
-            cur.execute('''UPDATE bronze.inv_snapshot_members SET member_name='conflicting name'
-                WHERE snapshot_id=%s AND raw_id=(SELECT min(raw_id) FROM bronze.inv_snapshot_members
+            cur.execute('''UPDATE taldau.bronze_inv_snapshot_members SET member_name='conflicting name'
+                WHERE snapshot_id=%s AND raw_id=(SELECT min(raw_id) FROM taldau.bronze_inv_snapshot_members
                     WHERE snapshot_id=%s AND dimension='sif')''',(self.sid,self.sid))
         result,errors=self.checks()
         self.assertFalse(result['valid'])
@@ -374,8 +374,8 @@ class SnapshotTests(unittest.TestCase):
     def test_missing_request_checkpoint_detected_despite_complete_flag(self):
         self.complete()
         with self.conn.cursor() as cur:
-            cur.execute('''DELETE FROM bronze.inv_request_tasks WHERE run_id=%s AND request_hash=
-                (SELECT min(request_hash) FROM bronze.inv_request_tasks WHERE run_id=%s)''',
+            cur.execute('''DELETE FROM taldau.bronze_inv_request_tasks WHERE run_id=%s AND request_hash=
+                (SELECT min(request_hash) FROM taldau.bronze_inv_request_tasks WHERE run_id=%s)''',
                 (self.chunks[268012][1],self.chunks[268012][1]))
         result,errors=self.checks()
         self.assertFalse(result['valid'])
@@ -388,28 +388,28 @@ class SnapshotTests(unittest.TestCase):
         with self.conn.cursor() as cur:
             cur.execute('CREATE TEMP TABLE ets_fixture (ryear int,reporting_period bigint,kato1 bigint,krp bigint,sif bigint,gsvziok bigint,value numeric,space_element_set_id text) ON COMMIT DROP')
             cur.execute('''INSERT INTO ets_fixture SELECT 2025,reporting_period,kato_id,krp_id,sif_id,gsvziok_id,value,'fixture-only'
-                FROM silver.inv_fixed_assets WHERE source_snapshot_id=%s''',(self.sid,))
-            cur.execute('SELECT reconciliation.capture_inv_ets(%s,%s::regclass)',(dataset,'ets_fixture'))
+                FROM taldau.silver_inv_fixed_assets WHERE source_snapshot_id=%s''',(self.sid,))
+            cur.execute('SELECT taldau.reconciliation_capture_inv_ets(%s,%s::regclass)',(dataset,'ets_fixture'))
             # Controlled fixture IDs are known to be source IDs. Production requires reviewed evidence.
             for dimension,column in [('kato','kato1'),('krp','krp'),('sif','sif'),('gsvziok','gsvziok')]:
-                cur.execute('''INSERT INTO reconciliation.ets_inv_key_map
+                cur.execute('''INSERT INTO taldau.reconciliation_ets_inv_key_map
                     SELECT DISTINCT %s,%s,source_row->>%s,(source_row->>%s)::bigint,'Synthetic fixture uses Taldau source IDs'
-                    FROM reconciliation.ets_inv_raw WHERE dataset_id=%s''',(dataset,dimension,column,column,dataset))
-            cur.execute('SELECT reconciliation.compare_inv_ets(%s,%s)',(self.sid,dataset))
+                    FROM taldau.reconciliation_ets_inv_raw WHERE dataset_id=%s''',(dataset,dimension,column,column,dataset))
+            cur.execute('SELECT taldau.reconciliation_compare_inv_ets(%s,%s)',(self.sid,dataset))
             self.assertEqual(cur.fetchone()[0],0)
-            cur.execute('''SELECT row_id FROM reconciliation.ets_inv_raw WHERE dataset_id=%s ORDER BY row_id LIMIT 3''',(dataset,))
+            cur.execute('''SELECT row_id FROM taldau.reconciliation_ets_inv_raw WHERE dataset_id=%s ORDER BY row_id LIMIT 3''',(dataset,))
             one,two,three=[r[0] for r in cur.fetchall()]
-            cur.execute("UPDATE reconciliation.ets_inv_raw SET source_row=jsonb_set(source_row,'{value}','999') WHERE row_id=%s",(one,))
-            cur.execute('DELETE FROM reconciliation.ets_inv_raw WHERE row_id=%s',(two,))
-            cur.execute('INSERT INTO reconciliation.ets_inv_raw(dataset_id,source_row) SELECT dataset_id,source_row FROM reconciliation.ets_inv_raw WHERE row_id=%s',(three,))
-            cur.execute("INSERT INTO reconciliation.ets_inv_key_map VALUES(%s,'gsvziok','999999999',999999999,'Synthetic extra ETS member')",(dataset,))
-            cur.execute('''INSERT INTO reconciliation.ets_inv_raw(dataset_id,source_row)
+            cur.execute("UPDATE taldau.reconciliation_ets_inv_raw SET source_row=jsonb_set(source_row,'{value}','999') WHERE row_id=%s",(one,))
+            cur.execute('DELETE FROM taldau.reconciliation_ets_inv_raw WHERE row_id=%s',(two,))
+            cur.execute('INSERT INTO taldau.reconciliation_ets_inv_raw(dataset_id,source_row) SELECT dataset_id,source_row FROM taldau.reconciliation_ets_inv_raw WHERE row_id=%s',(three,))
+            cur.execute("INSERT INTO taldau.reconciliation_ets_inv_key_map VALUES(%s,'gsvziok','999999999',999999999,'Synthetic extra ETS member')",(dataset,))
+            cur.execute('''INSERT INTO taldau.reconciliation_ets_inv_raw(dataset_id,source_row)
                 SELECT dataset_id,jsonb_set(source_row,'{gsvziok}','999999999')
-                FROM reconciliation.ets_inv_raw WHERE row_id=%s''',(one,))
-            cur.execute('SELECT reconciliation.compare_inv_ets(%s,%s)',(self.sid,dataset))
+                FROM taldau.reconciliation_ets_inv_raw WHERE row_id=%s''',(one,))
+            cur.execute('SELECT taldau.reconciliation_compare_inv_ets(%s,%s)',(self.sid,dataset))
             self.assertEqual(cur.fetchone()[0],4)
             cur.execute('''SELECT sum(missing_in_taldau),sum(extra_in_taldau),sum(value_mismatch),sum(duplicates_ets)
-                FROM reconciliation.inv_results WHERE snapshot_id=%s AND dataset_id=%s''',(self.sid,dataset))
+                FROM taldau.reconciliation_inv_results WHERE snapshot_id=%s AND dataset_id=%s''',(self.sid,dataset))
             self.assertEqual(cur.fetchone(),(1,1,1,1))
 
 

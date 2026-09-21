@@ -38,7 +38,7 @@ def taldau_inv_fixed_assets():
         conn = _connection()
         try:
             with conn.cursor() as cur:
-                cur.execute('SELECT config,scope FROM bronze.extraction_runs WHERE run_id=%s',(run_id,))
+                cur.execute('SELECT config,scope FROM taldau.bronze_extraction_runs WHERE run_id=%s',(run_id,))
                 existing = cur.fetchone()
             config,scope = existing if existing else (get_config(conn),PILOT_SCOPE)
             return {'run_id':run_id,'config':config,'scope':scope}

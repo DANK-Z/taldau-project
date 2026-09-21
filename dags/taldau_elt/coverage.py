@@ -11,16 +11,16 @@ from taldau_elt.snapshots import read_snapshot, discover_territories, extract_ch
 
 def candidate_sql(prepared: bool = False) -> str:
     """Works before migration 008 for auditing an existing source snapshot."""
-    reuse = 'UNION SELECT raw_id FROM bronze.inv_reuse_raw WHERE snapshot_id=%s' if prepared else ''
+    reuse = 'UNION SELECT raw_id FROM taldau.bronze_inv_reuse_raw WHERE snapshot_id=%s' if prepared else ''
     return '''WITH runs AS (
-        SELECT discovery_run_id AS run_id FROM bronze.inv_snapshots WHERE snapshot_id=%s
-        UNION ALL SELECT run_id FROM bronze.inv_chunks WHERE snapshot_id=%s
+        SELECT discovery_run_id AS run_id FROM taldau.bronze_inv_snapshots WHERE snapshot_id=%s
+        UNION ALL SELECT run_id FROM taldau.bronze_inv_chunks WHERE snapshot_id=%s
     ), ids AS (
-        SELECT id FROM bronze.taldau_api_raw WHERE run_id IN (SELECT run_id FROM runs)
-        UNION SELECT raw_id FROM bronze.inv_request_tasks WHERE run_id IN (SELECT run_id FROM runs)
+        SELECT id FROM taldau.bronze_taldau_api_raw WHERE run_id IN (SELECT run_id FROM runs)
+        UNION SELECT raw_id FROM taldau.bronze_inv_request_tasks WHERE run_id IN (SELECT run_id FROM runs)
             AND state='complete'
         '''+reuse+'''
-    ) SELECT r.* FROM bronze.taldau_api_raw r JOIN ids ON ids.id=r.id WHERE r.indicator_id=701827'''
+    ) SELECT r.* FROM taldau.bronze_taldau_api_raw r JOIN ids ON ids.id=r.id WHERE r.indicator_id=701827'''
 
 
 def audit_bronze(conn: Any, snapshot_id: str, year_start: int = 2023, year_end: int = 2026,
@@ -36,7 +36,7 @@ def audit_bronze(conn: Any, snapshot_id: str, year_start: int = 2023, year_end: 
             FROM raw r CROSS JOIN LATERAL jsonb_array_elements(r.response_data) n(node)
             CROSS JOIN LATERAL (SELECT DISTINCT regexp_replace(key,'^y','') AS code
                 FROM jsonb_object_keys(n.node) key WHERE key ~ '^y?[0-9]{6}$'
-                  AND bronze.inv_int(right(key,4)) BETWEEN %s AND %s) k
+                  AND taldau.bronze_inv_int(right(key,4)) BETWEEN %s AND %s) k
             WHERE r.dimension='gsvziok'
         ) SELECT code,reporting_period,count(*) FILTER(WHERE paired),
             count(*) FILTER(WHERE paired AND raw_value ~ '^[+-]?[0-9]+([.][0-9]+)?$'),
@@ -57,7 +57,7 @@ def audit_bronze(conn: Any, snapshot_id: str, year_start: int = 2023, year_end: 
             CROSS JOIN LATERAL jsonb_array_elements(r.response_data) n(node)
             CROSS JOIN LATERAL jsonb_object_keys(n.node) key
             WHERE r.dimension='gsvziok' AND key ~ '^y?[0-9]{6}$'
-              AND bronze.inv_int(right(key,4)) BETWEEN %s AND %s GROUP BY 1''',params)
+              AND taldau.bronze_inv_int(right(key,4)) BETWEEN %s AND %s GROUP BY 1''',params)
         raw_per_year=dict(cur.fetchall())
     years=[]
     for year in range(year_start,year_end+1):

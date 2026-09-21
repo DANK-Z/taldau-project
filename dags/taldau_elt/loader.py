@@ -33,7 +33,7 @@ def tree_params(config: dict, terms: list[str], dimension: str, parent: str = ''
 
 def get_config(conn: Any) -> dict:
     with conn.cursor() as cur:
-        cur.execute("SELECT config FROM metadata.elt_pipelines WHERE pipeline_id=%s AND pipeline_type='cube'",
+        cur.execute("SELECT config FROM taldau.metadata_elt_pipelines WHERE pipeline_id=%s AND pipeline_type='cube'",
                     ('inv_fixed_assets_monthly',))
         row = cur.fetchone()
     if not row:
@@ -58,7 +58,7 @@ class BronzeLoader:
         params = tree_params(c, terms, dimension, parent)
         digest = request_hash(c['endpoint'], params)
         with self.conn.cursor() as cur:
-            cur.execute('SELECT response_text FROM bronze.taldau_api_raw WHERE run_id=%s AND request_hash=%s',
+            cur.execute('SELECT response_text FROM taldau.bronze_taldau_api_raw WHERE run_id=%s AND request_hash=%s',
                         (self.run_id, digest))
             cached = cur.fetchone()
         self.conn.commit()
@@ -79,7 +79,7 @@ class BronzeLoader:
             json.loads(body, parse_float=Decimal)
             with self.conn:
                 with self.conn.cursor() as cur:
-                    cur.execute('''INSERT INTO bronze.taldau_api_raw
+                    cur.execute('''INSERT INTO taldau.bronze_taldau_api_raw
                         (run_id,indicator_id,endpoint,period_id,request_params,request_hash,
                          response_data,response_text,response_hash,http_status,dimension,tree_depth)
                         VALUES (%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s)
@@ -128,17 +128,17 @@ class BronzeLoader:
         try:
             with self.conn:
                 with self.conn.cursor() as cur:
-                    cur.execute('''INSERT INTO bronze.extraction_runs(run_id,pipeline_id,config,scope)
+                    cur.execute('''INSERT INTO taldau.bronze_extraction_runs(run_id,pipeline_id,config,scope)
                         VALUES (%s,'inv_fixed_assets_monthly',%s,%s) ON CONFLICT DO NOTHING''',
                         (self.run_id, Json(self.config), Json(self.scope)))
-                    cur.execute('SELECT config,scope,status FROM bronze.extraction_runs WHERE run_id=%s', (self.run_id,))
+                    cur.execute('SELECT config,scope,status FROM taldau.bronze_extraction_runs WHERE run_id=%s', (self.run_id,))
                     config, scope, status = cur.fetchone()
                     if config != self.config or scope != self.scope:
                         raise ValueError('run_id already belongs to another configuration/scope')
                     owns_run = True
                     if status in ('bronze_complete', 'silver_validated', 'gold_validated'):
                         return {'run_id': self.run_id, 'http_requests': 0, 'already_complete': True}
-                    cur.execute("UPDATE bronze.extraction_runs SET status='loading',last_error=NULL WHERE run_id=%s", (self.run_id,))
+                    cur.execute("UPDATE taldau.bronze_extraction_runs SET status='loading',last_error=NULL WHERE run_id=%s", (self.run_id,))
             roots = self.config['roots']
             terms = [roots[d] for d in ('kato','krp','sif','gsvziok')]
             # Preserve actual country -> Astana edge; do not walk other territories.
@@ -156,14 +156,14 @@ class BronzeLoader:
                         pass  # No fact/value transformation in Python.
             with self.conn:
                 with self.conn.cursor() as cur:
-                    cur.execute("UPDATE bronze.extraction_runs SET status='bronze_complete',completed_at=now() WHERE run_id=%s", (self.run_id,))
+                    cur.execute("UPDATE taldau.bronze_extraction_runs SET status='bronze_complete',completed_at=now() WHERE run_id=%s", (self.run_id,))
             return {'run_id': self.run_id, 'http_requests': self.http_count, 'cache_hits': self.cache_hits}
         except Exception as exc:
             self.conn.rollback()
             if owns_run:
                 with self.conn:
                     with self.conn.cursor() as cur:
-                        cur.execute("UPDATE bronze.extraction_runs SET status='failed',last_error=%s WHERE run_id=%s AND status IN ('loading','failed')",
+                        cur.execute("UPDATE taldau.bronze_extraction_runs SET status='failed',last_error=%s WHERE run_id=%s AND status IN ('loading','failed')",
                                     (str(exc)[:4000], self.run_id))
             LOG.exception('Extraction failed; committed Bronze requests can be resumed')
             raise
