@@ -5,7 +5,10 @@ No tasks performing extraction, SQL or publication are executed.
 import ast
 import importlib.util
 from pathlib import Path
+import shutil
 import sys
+import tempfile
+from types import ModuleType
 import unittest
 from unittest.mock import Mock, patch
 
@@ -30,6 +33,86 @@ class AirflowImportTests(unittest.TestCase):
                                      f'{path}:{node.lineno}: {module}')
                 if isinstance(node, ast.keyword):
                     self.assertNotEqual(node.arg, 'skip_when_already_exists', str(path))
+
+    def test_dags_import_from_nested_deployment_with_only_dag_root_on_path(self):
+        class Node:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def __rshift__(self, other):
+                return other
+
+        def task_decorator(function=None, **kwargs):
+            def decorate(callable_):
+                def invoke(*args, **kwargs):
+                    return Node()
+                invoke.expand = lambda **mapped: Node()
+                return invoke
+            return decorate(function) if function is not None else decorate
+
+        task_decorator.branch = task_decorator
+
+        def dag_decorator(**kwargs):
+            def decorate(callable_):
+                def invoke(*args, **call_kwargs):
+                    callable_(*args, **call_kwargs)
+                    return Node()
+                return invoke
+            return decorate
+
+        stubs = {}
+        for name in ('airflow', 'airflow.decorators', 'airflow.models', 'airflow.models.param',
+                     'airflow.exceptions', 'airflow.operators', 'airflow.operators.trigger_dagrun'):
+            stubs[name] = ModuleType(name)
+        stubs['airflow.decorators'].dag = dag_decorator
+        stubs['airflow.decorators'].task = task_decorator
+        stubs['airflow.models.param'].Param = lambda default, **kwargs: default
+        stubs['airflow.exceptions'].AirflowSkipException = type('AirflowSkipException', (Exception,), {})
+        stubs['airflow.exceptions'].DagRunAlreadyExists = type('DagRunAlreadyExists', (Exception,), {})
+        stubs['airflow.operators.trigger_dagrun'].TriggerDagRunOperator = Node
+        pendulum = ModuleType('pendulum')
+        pendulum.datetime = lambda *args, **kwargs: object()
+        stubs['pendulum'] = pendulum
+
+        dag_names = ('taldau_inv_fixed_assets_2025.py', 'taldau_inv_fixed_assets.py',
+                     'taldau_pipeline.py')
+        original_path = list(sys.path)
+        saved_modules = {name: module for name, module in sys.modules.items()
+                         if name == 'taldau_elt' or name.startswith('taldau_elt.')}
+        with tempfile.TemporaryDirectory() as temporary:
+            airflow_root = Path(temporary)
+            nested_dags = airflow_root / 'taldau' / 'dags'
+            nested_dags.mkdir(parents=True)
+            shutil.copytree(ROOT / 'dags' / 'taldau_elt', nested_dags / 'taldau_elt')
+            for name in dag_names:
+                shutil.copy2(ROOT / 'dags' / name, nested_dags / name)
+            try:
+                for name in saved_modules:
+                    sys.modules.pop(name, None)
+                system_paths = []
+                for path in original_path:
+                    if not path:
+                        continue
+                    try:
+                        Path(path).resolve().relative_to(ROOT)
+                    except ValueError:
+                        system_paths.append(path)
+                # Keep the Python runtime paths, but expose only the outer Airflow DAG root.
+                self.assertNotIn(str(nested_dags.resolve()), system_paths)
+                sys.path[:] = [str(airflow_root), *system_paths]
+                with patch.dict(sys.modules, stubs):
+                    for index, name in enumerate(dag_names):
+                        module_name = f'nested_dag_{index}'
+                        spec = importlib.util.spec_from_file_location(module_name, nested_dags / name)
+                        module = importlib.util.module_from_spec(spec)
+                        spec.loader.exec_module(module)
+                        self.assertEqual(sys.path[0], str(nested_dags.resolve()))
+            finally:
+                sys.path[:] = original_path
+                for name in list(sys.modules):
+                    if name == 'taldau_elt' or name.startswith('taldau_elt.'):
+                        sys.modules.pop(name, None)
+                sys.modules.update(saved_modules)
 
 
 @unittest.skipUnless(HAS_AIRFLOW, 'Requires the Airflow 2.9.2 runtime; not a mocked DAG parser')

@@ -1,4 +1,10 @@
 from datetime import timedelta
+from pathlib import Path
+import sys
+
+_DAG_DIR = str(Path(__file__).resolve().parent)
+if _DAG_DIR not in sys.path:
+    sys.path.insert(0, _DAG_DIR)
 
 import pendulum
 
