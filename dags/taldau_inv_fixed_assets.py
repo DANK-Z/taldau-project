@@ -1,4 +1,4 @@
-"""Bounded ELT pilot: Astana, December 2025. No country-wide extraction."""
+"""Legacy/deprecated bounded pilot: Astana, December 2025."""
 from datetime import timedelta
 from pathlib import Path
 import sys
@@ -26,7 +26,7 @@ def _connection():
      default_args={'retries':2,'retry_delay':timedelta(minutes=1),'retry_exponential_backoff':True},
      params={'bronze_run_id':Param(None,type=['null','string'],
              description='Existing Bronze run for offline replay; null captures a new API version.')},
-     tags=['taldau','elt','cube','pilot'])
+     tags=['taldau','elt','cube','pilot','legacy','deprecated'])
 def taldau_inv_fixed_assets():
     @task
     def get_metadata():

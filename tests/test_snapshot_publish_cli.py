@@ -38,7 +38,8 @@ class PublishCliTests(unittest.TestCase):
             cli.main()
         result=json.loads(output.getvalue())
         self.assertEqual(result['migrations'][0],'009_single_taldau_schema.sql')
-        self.assertEqual(result['migrations'][-1],'008_multi_year_snapshot.sql')
+        self.assertEqual(result['migrations'][-1],'010_multi_indicator_framework.sql')
+        self.assertIn('008_multi_year_snapshot.sql',result['migrations'])
         self.assertEqual(result['http_requests'],0)
         executed=conn.cursor.return_value.__enter__.return_value.execute.call_args_list
         self.assertEqual(len(executed),len(result['migrations']))

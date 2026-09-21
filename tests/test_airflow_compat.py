@@ -37,14 +37,14 @@ class AirflowImportTests(unittest.TestCase):
     def test_production_dags_use_existing_database_connection(self):
         connection_ids = []
         for name in ('taldau_inv_fixed_assets_2025.py', 'taldau_inv_fixed_assets.py',
-                     'taldau_pipeline.py'):
+                     'taldau_pipeline.py', 'taldau_statistics_2023_2026.py'):
             tree = ast.parse((ROOT / 'dags' / name).read_text(encoding='utf-8'))
             for node in ast.walk(tree):
                 if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                         and node.func.attr == 'get_connection' and node.args
                         and isinstance(node.args[0], ast.Constant)):
                     connection_ids.append(node.args[0].value)
-        self.assertEqual(len(connection_ids), 7)
+        self.assertEqual(len(connection_ids), 8)
         self.assertEqual(set(connection_ids), {'digest_target_db'})
 
     def test_dags_import_from_nested_deployment_with_only_dag_root_on_path(self):
@@ -88,7 +88,7 @@ class AirflowImportTests(unittest.TestCase):
         stubs['pendulum'] = pendulum
 
         dag_names = ('taldau_inv_fixed_assets_2025.py', 'taldau_inv_fixed_assets.py',
-                     'taldau_pipeline.py')
+                     'taldau_pipeline.py', 'taldau_statistics_2023_2026.py')
         original_path = list(sys.path)
         saved_modules = {name: module for name, module in sys.modules.items()
                          if name == 'taldau_elt' or name.startswith('taldau_elt.')}
@@ -190,7 +190,8 @@ class AirflowRuntimeTests(unittest.TestCase):
         from airflow.models.mappedoperator import MappedOperator
         from taldau_elt.airflow_compat import SkipExistingDagRunOperator
         self.assertEqual(set(self.bag.dags), {
-            'taldau_pipeline', 'taldau_inv_fixed_assets', 'taldau_inv_fixed_assets_2025'})
+            'taldau_pipeline', 'taldau_inv_fixed_assets', 'taldau_inv_fixed_assets_2025',
+            'taldau_statistics_2023_2026'})
         dag = self.bag.dags['taldau_inv_fixed_assets_2025']
         self.assertEqual(set(dag.task_ids), {'authorize_snapshot', 'discover', 'plan_wave',
             'load_chunk', 'route_wave', 'continue_snapshot', 'validate_snapshot', 'diagnostics'})
@@ -214,6 +215,23 @@ class AirflowRuntimeTests(unittest.TestCase):
         self.assertFalse(continuation.reset_dag_run)
         self.assertFalse(continuation.wait_for_completion)
         self.assertIn('next_run_id', continuation.trigger_run_id)
+
+    def test_generic_dag_mapping_pool_stop_and_concurrency(self):
+        from airflow.models.mappedoperator import MappedOperator
+        from taldau_elt.airflow_compat import SkipExistingDagRunOperator
+        dag = self.bag.dags['taldau_statistics_2023_2026']
+        self.assertEqual(set(dag.task_ids), {'authorize_batch','list_snapshots','discover','plan_wave',
+            'load_chunk','route_wave','continue_batch','validate_batch','diagnostics','final_batch_summary'})
+        self.assertEqual(dag.max_active_runs,1)
+        self.assertFalse(dag.params['allow_extraction'])
+        for task_id in ('discover','load_chunk'):
+            mapped=dag.get_task(task_id)
+            self.assertIsInstance(mapped,MappedOperator)
+            self.assertEqual((mapped.pool,mapped.pool_slots,mapped.max_active_tis_per_dag),('taldau_api',1,3))
+        continuation=dag.get_task('continue_batch')
+        self.assertIsInstance(continuation,SkipExistingDagRunOperator)
+        self.assertFalse(continuation.reset_dag_run)
+        self.assertEqual({task.task_id for task in dag.leaves},{'continue_batch','final_batch_summary'})
 
     def test_branch_keeps_deterministic_continuation_id(self):
         dag = self.bag.dags['taldau_inv_fixed_assets_2025']

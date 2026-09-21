@@ -1,3 +1,4 @@
+"""Legacy/deprecated region-metric DAG retained for compatibility."""
 from datetime import timedelta
 from pathlib import Path
 import sys
@@ -26,7 +27,7 @@ from airflow.decorators import dag, task
         "retry_delay": timedelta(seconds=30),
         "retry_exponential_backoff": True,
     },
-    tags=["taldau", "data-engineering"],
+    tags=["taldau", "data-engineering", "legacy", "deprecated"],
 )
 def taldau_pipeline():
 

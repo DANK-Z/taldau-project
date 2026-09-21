@@ -135,6 +135,12 @@ class StaticSingleSchemaTests(unittest.TestCase):
         self.assertNotRegex(sql,r'(?i)DROP\s+SCHEMA')
         self.assertIn('CREATE SCHEMA IF NOT EXISTS taldau',sql)
 
+    def test_generic_framework_stays_in_taldau_and_is_non_destructive(self):
+        sql=(SQL_DIR/'010_multi_indicator_framework.sql').read_text(encoding='utf-8')
+        self.assertNotRegex(sql,r'(?i)DROP\s+SCHEMA')
+        self.assertNotRegex(sql,r'(?i)(?:bronze|silver|gold|staging|quality|metadata)\.[A-Za-z_]')
+        self.assertIn('CREATE SCHEMA IF NOT EXISTS taldau',sql)
+
 
 @unittest.skipUnless(os.getenv('TALDAU_TEST_DB')=='1','Requires isolated test DB')
 class FreshSingleSchemaTests(unittest.TestCase):
@@ -186,9 +192,20 @@ class LegacyMigrationTests(unittest.TestCase):
                 cur.execute("""INSERT INTO bronze.inv_snapshots
                     (snapshot_id,year,config,discovery_run_id,state,year_start,year_end)
                     VALUES('legacy-preserved',2025,'{}','legacy-preserved','prepared',2025,2025)""")
+                cur.execute("""INSERT INTO bronze.extraction_runs(run_id,pipeline_id,config,scope,status)
+                    VALUES('kz-investments-2023-2026-prod-v1:discovery','inv_fixed_assets_monthly',
+                    (SELECT config FROM metadata.elt_pipelines WHERE pipeline_id='inv_fixed_assets_monthly'),'{}','loading')""")
+                cur.execute("""INSERT INTO bronze.inv_snapshots
+                    (snapshot_id,year,config,discovery_run_id,state,year_start,year_end)
+                    SELECT 'kz-investments-2023-2026-prod-v1',2023,config,
+                    'kz-investments-2023-2026-prod-v1:discovery','prepared',2023,2026
+                    FROM metadata.elt_pipelines WHERE pipeline_id='inv_fixed_assets_monthly'""")
                 migration=(SQL_DIR/'009_single_taldau_schema.sql').read_text(encoding='utf-8')
                 cur.execute(migration)
                 cur.execute(migration)  # repeat must be a no-op
+                framework=(SQL_DIR/'010_multi_indicator_framework.sql').read_text(encoding='utf-8')
+                cur.execute(framework)
+                cur.execute(framework)
 
     @classmethod
     def tearDownClass(cls):
@@ -225,6 +242,14 @@ class LegacyMigrationTests(unittest.TestCase):
                     continue
                 cur.execute('SELECT to_regclass(%s)',(new,))
                 self.assertIsNotNone(cur.fetchone()[0],new)
+
+    def test_prepared_production_snapshot_is_preserved_by_010(self):
+        with self.conn.cursor() as cur:
+            cur.execute("""SELECT indicator_key,state,year_start,year_end,discovery_run_id,
+                source_config->>'indicator_id' FROM taldau.bronze_snapshots
+                WHERE snapshot_id='kz-investments-2023-2026-prod-v1'""")
+            self.assertEqual(cur.fetchone(),('investments_fixed_assets','prepared',2023,2026,
+                'kz-investments-2023-2026-prod-v1:discovery','701827'))
 
 
 if __name__=='__main__':

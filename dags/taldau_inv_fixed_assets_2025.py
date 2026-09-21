@@ -1,4 +1,4 @@
-"""Manually authorized full-country ELT, mapped in bounded waves. Paused by default."""
+"""Legacy/deprecated investments-only entry point retained for compatibility."""
 from datetime import timedelta
 from pathlib import Path
 import sys
@@ -28,7 +28,7 @@ def connection():
      default_args={'retries':2,'retry_delay':timedelta(minutes=2),'retry_exponential_backoff':True},
      params={'snapshot_id':Param('',type='string'),
              'allow_extraction':Param(False,type='boolean',description='Explicitly authorize missing HTTP requests for the frozen snapshot scope.')},
-     tags=['taldau','elt','cube','multi-year','country'])
+     tags=['taldau','elt','cube','multi-year','country','legacy','deprecated'])
 def investments_2025():
     @task(retries=0)
     def authorize_snapshot():
