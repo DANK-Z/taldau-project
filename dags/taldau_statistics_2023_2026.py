@@ -167,7 +167,7 @@ def statistics_2023_2026():
     checked = validate(batch)
     route >> [continuation, checked]
     diagnosed = diagnostics(checked)
-    summary = final_batch_summary(checked)
+    summary = final_batch_summary(batch)
     diagnosed >> summary
 
 
