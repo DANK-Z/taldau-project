@@ -62,11 +62,13 @@ def main() -> None:
         if args.action in ("status", "snapshot"):
             conn.set_session(readonly=True, isolation_level="REPEATABLE READ")
         if args.action == "migrate":
-            path = ROOT / "dags" / "taldau_elt" / "sql" / "010_multi_indicator_framework.sql"
+            names = ["010_multi_indicator_framework.sql", "011_indicator_registry_sources.sql"]
             with conn:
                 with conn.cursor() as cur:
-                    cur.execute(path.read_text(encoding="utf-8"))
-            result = {"migration": path.name, "http_requests": 0}
+                    for name in names:
+                        path = ROOT / "dags" / "taldau_elt" / "sql" / name
+                        cur.execute(path.read_text(encoding="utf-8"))
+            result = {"migrations": names, "http_requests": 0}
         elif args.action == "prepare":
             result = create_batch(conn, args.batch_id, resume_failed=args.resume_failed)
         elif args.action == "status":

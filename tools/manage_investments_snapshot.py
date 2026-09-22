@@ -73,7 +73,7 @@ def main():
             # single-schema baseline is replayed. On a fresh install it is an idempotent no-op.
             names=['009_single_taldau_schema.sql','004_snapshot_model.sql','005_snapshot_validation.sql',
                    '006_ets_reconciliation.sql','007_gold_snapshot_publish.sql','008_multi_year_snapshot.sql',
-                   '010_multi_indicator_framework.sql']
+                   '010_multi_indicator_framework.sql','011_indicator_registry_sources.sql']
             with conn:
                 with conn.cursor() as cur:
                     for name in names:

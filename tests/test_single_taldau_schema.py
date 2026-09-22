@@ -136,10 +136,11 @@ class StaticSingleSchemaTests(unittest.TestCase):
         self.assertIn('CREATE SCHEMA IF NOT EXISTS taldau',sql)
 
     def test_generic_framework_stays_in_taldau_and_is_non_destructive(self):
-        sql=(SQL_DIR/'010_multi_indicator_framework.sql').read_text(encoding='utf-8')
-        self.assertNotRegex(sql,r'(?i)DROP\s+SCHEMA')
-        self.assertNotRegex(sql,r'(?i)(?:bronze|silver|gold|staging|quality|metadata)\.[A-Za-z_]')
-        self.assertIn('CREATE SCHEMA IF NOT EXISTS taldau',sql)
+        for name in ('010_multi_indicator_framework.sql','011_indicator_registry_sources.sql'):
+            sql=(SQL_DIR/name).read_text(encoding='utf-8')
+            self.assertNotRegex(sql,r'(?i)DROP\s+SCHEMA',name)
+            self.assertNotRegex(sql,r'(?i)(?:bronze|silver|gold|staging|quality|metadata)\.[A-Za-z_]',name)
+            self.assertIn('CREATE SCHEMA IF NOT EXISTS taldau',sql,name)
 
 
 @unittest.skipUnless(os.getenv('TALDAU_TEST_DB')=='1','Requires isolated test DB')
@@ -206,6 +207,9 @@ class LegacyMigrationTests(unittest.TestCase):
                 framework=(SQL_DIR/'010_multi_indicator_framework.sql').read_text(encoding='utf-8')
                 cur.execute(framework)
                 cur.execute(framework)
+                sources=(SQL_DIR/'011_indicator_registry_sources.sql').read_text(encoding='utf-8')
+                cur.execute(sources)
+                cur.execute(sources)
 
     @classmethod
     def tearDownClass(cls):
@@ -243,13 +247,17 @@ class LegacyMigrationTests(unittest.TestCase):
                 cur.execute('SELECT to_regclass(%s)',(new,))
                 self.assertIsNotNone(cur.fetchone()[0],new)
 
-    def test_prepared_production_snapshot_is_preserved_by_010(self):
+    def test_prepared_production_snapshot_is_preserved_through_011(self):
         with self.conn.cursor() as cur:
             cur.execute("""SELECT indicator_key,state,year_start,year_end,discovery_run_id,
-                source_config->>'indicator_id' FROM taldau.bronze_snapshots
+                source_config->>'indicator_id',source_config ? 'period_semantics'
+                FROM taldau.bronze_snapshots
                 WHERE snapshot_id='kz-investments-2023-2026-prod-v1'""")
             self.assertEqual(cur.fetchone(),('investments_fixed_assets','prepared',2023,2026,
-                'kz-investments-2023-2026-prod-v1:discovery','701827'))
+                'kz-investments-2023-2026-prod-v1:discovery','701827',False))
+            cur.execute("""SELECT extraction_config->>'period_semantics'
+                FROM taldau.metadata_indicator_registry WHERE indicator_key='investments_fixed_assets'""")
+            self.assertEqual(cur.fetchone()[0],'cumulative')
 
 
 if __name__=='__main__':

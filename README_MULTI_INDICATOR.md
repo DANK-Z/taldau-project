@@ -8,26 +8,29 @@ diagnostics and a batch summary. It never publishes automatically.
 ## Registry
 
 `taldau.metadata_indicator_registry` is authoritative. `taldau.metadata_enabled_indicators` exposes only
-enabled rows with a usable source configuration. Investments are enabled with the verified source values:
+enabled rows with a usable source configuration. Migration `011_indicator_registry_sources.sql` enables
+the eight verified sources below without changing source configs already frozen in Bronze snapshots:
 
-| field | value |
-|---|---|
-| `indicator_key` | `investments_fixed_assets` |
-| `indicator_id` | `701827` |
-| `period_id` | `8` |
-| dimensions | `kato=68`, `krp=90`, `sif=459`, `gsvziok=4043` |
-| roots | `741880`, `741927`, `807855`, `19202525` |
-| frequency | monthly |
+| indicator key | source ID | period ID | frequency | period semantics | idx |
+|---|---:|---:|---|---|---:|
+| `investments_fixed_assets` | 701827 | 8 | monthly | cumulative | 3 |
+| `population` | 703831 | 7 | annual | point_in_time_start_period | 3 |
+| `average_salary` | 702972 | 5 | quarterly | period | 0 |
+| `grp` | 2709379 | 9 | quarterly | cumulative | 0 |
+| `agriculture` | 701189 | 8 | monthly | cumulative | 0 |
+| `industry` | 701592 | 8 | monthly | cumulative | 1 |
+| `trade` | 2709782 | 4 | monthly | period | 0 |
+| `construction` | 701885 | 8 | monthly | cumulative | 0 |
 
-Population, average salary, GRP, agriculture, industry, trade and construction are catalog rows with
-`enabled=false` and NULL source IDs/config. The DAG cannot schedule them. To add an indicator, insert or
-update one registry row with verified IDs, ordered dimensions, a root for every dimension and extraction
-metadata, then enable it. The Python DAG and traversal code do not change.
+Real Taldau codes use `MMYYYY`: monthly accepts every month, quarterly accepts quarter-end months
+`03/06/09/12`, and annual accepts `12YYYY`. Legacy `QnYYYY` and `YYYY` parsing remains supported.
+Completed historical years are expected to contain 12, 4 or 1 periods respectively. Missing periods in
+the current year remain a non-blocking diagnostic.
 
 ## Generic objects and compatibility
 
-Migration `010_multi_indicator_framework.sql` is additive and idempotent. It does not drop schemas or
-legacy objects. The authoritative mapping is:
+Migrations `010_multi_indicator_framework.sql` and `011_indicator_registry_sources.sql` are additive and
+idempotent. They do not drop schemas or legacy objects. The authoritative mapping is:
 
 | investments-only | generic authoritative object |
 |---|---|
