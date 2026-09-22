@@ -14,7 +14,7 @@ from psycopg2.extras import Json
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'dags'))
 from taldau_elt.statistics import (WAVE_SIZE,batch_wave_outcome,create_batch,enabled_indicators,
-    pending_batch_chunks,publish_snapshot,read_snapshot,validate_batch)
+    extract_chunk,pending_batch_chunks,publish_snapshot,read_snapshot,validate_batch)
 from test_investments_snapshots import SandboxConnection
 
 
@@ -223,6 +223,45 @@ class MultiIndicatorFrameworkTests(unittest.TestCase):
         self.assertEqual(publish_snapshot(self.conn,new),1)
         with self.assertRaisesRegex(psycopg2.Error,'Newer data'):
             publish_snapshot(self.conn,old)
+
+    def test_chunk_failure_waits_for_wave_before_failing_snapshot(self):
+        batch='batch_'+uuid.uuid4().hex
+        create_batch(self.conn,batch)
+        with self.conn.cursor() as cur:
+            cur.execute("""SELECT snapshot_id,source_config FROM taldau.bronze_snapshots
+                WHERE batch_id=%s AND indicator_key='investments_fixed_assets'""",(batch,))
+            sid,config=cur.fetchone()
+            run=sid+':failure_fixture'
+            cur.execute("""UPDATE taldau.bronze_snapshots
+                SET discovery_complete=true,state='loading',expected_chunks=1
+                WHERE snapshot_id=%s""",(sid,))
+            cur.execute("""INSERT INTO taldau.bronze_extraction_runs(run_id,pipeline_id,config,scope)
+                VALUES(%s,'statistics_investments_fixed_assets',%s,'{}')""",(run,Json(config)))
+            cur.execute("""INSERT INTO taldau.bronze_chunks
+                (snapshot_id,chunk_key,coordinates,run_id)
+                VALUES(%s,'failure_fixture','{"kato":"268012"}',%s)
+                RETURNING chunk_id""",(sid,run))
+            chunk=cur.fetchone()[0]
+
+        with patch('taldau_elt.statistics.GenericTrackedLoader') as loader_cls:
+            loader_cls.return_value.walk.side_effect=RuntimeError('fixture failure')
+            with self.assertRaisesRegex(RuntimeError,'fixture failure'):
+                extract_chunk(self.conn,chunk,allow_http=False)
+
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT state FROM taldau.bronze_chunks WHERE chunk_id=%s",(chunk,))
+            self.assertEqual(cur.fetchone()[0],'failed')
+            cur.execute("SELECT state,last_error FROM taldau.bronze_snapshots WHERE snapshot_id=%s",(sid,))
+            state,error=cur.fetchone()
+            self.assertEqual(state,'loading')
+            self.assertIsNone(error)
+
+        self.assertEqual(batch_wave_outcome(self.conn,batch,[chunk]),'validate')
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT state,last_error FROM taldau.bronze_snapshots WHERE snapshot_id=%s",(sid,))
+            state,error=cur.fetchone()
+            self.assertEqual(state,'failed')
+            self.assertEqual(error,'One or more chunks failed')
 
     def test_wave_bound_and_failed_indicator_does_not_block_other(self):
         other=self.add_simple_indicator()

@@ -363,8 +363,6 @@ def extract_chunk(conn: Any, chunk_id: int, *, allow_http: bool) -> dict:
                 with conn.cursor() as cur:
                     cur.execute("""UPDATE taldau.bronze_chunks SET state='failed',last_error=%s,lease_until=NULL
                         WHERE chunk_id=%s AND lease_token=%s""", (str(exc)[:4000], chunk_id, token))
-                    cur.execute("UPDATE taldau.bronze_snapshots SET state='failed',last_error=%s WHERE snapshot_id=%s",
-                                (str(exc)[:4000], snapshot["snapshot_id"]))
                     cur.execute("UPDATE taldau.bronze_extraction_runs SET status='failed',last_error=%s WHERE run_id=%s",
                                 (str(exc)[:4000], run_id))
         raise
