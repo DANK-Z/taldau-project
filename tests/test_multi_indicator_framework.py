@@ -86,7 +86,7 @@ class MultiIndicatorFrameworkTests(unittest.TestCase):
             self.assertEqual(row['endpoint'],'https://taldau.stat.gov.kz/ru/Api/GetIndexTreeData')
             self.assertEqual(config['measure_id'],1)
             self.assertTrue(row['dimensions'][0]['chunk'])
-            self.assertEqual((row['year_start'],row['year_end']),(2023,2026))
+            self.assertEqual((row['year_start'],row['year_end']),(2023,2100))
         with self.conn.cursor() as cur:
             cur.execute("""SELECT pipeline_id,pipeline_type,config->>'period_semantics'
                 FROM taldau.metadata_elt_pipelines WHERE pipeline_id LIKE 'statistics_%' ORDER BY pipeline_id""")

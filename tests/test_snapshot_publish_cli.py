@@ -38,7 +38,7 @@ class PublishCliTests(unittest.TestCase):
             cli.main()
         result=json.loads(output.getvalue())
         self.assertEqual(result['migrations'][0],'009_single_taldau_schema.sql')
-        self.assertEqual(result['migrations'][-1],'011_indicator_registry_sources.sql')
+        self.assertEqual(result['migrations'][-1],'012_incremental_refresh.sql')
         self.assertIn('008_multi_year_snapshot.sql',result['migrations'])
         self.assertLess(result['migrations'].index('010_multi_indicator_framework.sql'),
                         result['migrations'].index('011_indicator_registry_sources.sql'))
@@ -47,7 +47,7 @@ class PublishCliTests(unittest.TestCase):
         self.assertEqual(len(executed),len(result['migrations']))
         self.assertTrue(any('CREATE OR REPLACE FUNCTION taldau.gold_publish_inv_snapshot' in call.args[0]
                             for call in executed))
-        self.assertIn('period_semantics',executed[-1].args[0])
+        self.assertIn('gold_fact_observations_lookup_idx',executed[-1].args[0])
 
 
 if __name__=='__main__': unittest.main()

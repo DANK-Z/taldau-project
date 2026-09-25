@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS taldau.metadata_indicator_registry (
     extraction_config jsonb,
     enabled boolean NOT NULL DEFAULT false,
     year_start integer NOT NULL DEFAULT 2023,
-    year_end integer NOT NULL DEFAULT 2026,
+    year_end integer NOT NULL DEFAULT 2100,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
     CHECK (year_start BETWEEN 2000 AND 2100 AND year_end BETWEEN year_start AND 2100),
@@ -51,14 +51,14 @@ VALUES
  '[{"key":"kato","dic_id":68,"chunk":true},{"key":"krp","dic_id":90},{"key":"sif","dic_id":459},{"key":"gsvziok","dic_id":4043}]',
  '{"kato":"741880","krp":"741927","sif":"807855","gsvziok":"19202525"}',
  '{"strategy":"tree_cube","measure_id":1,"idx":3,"frequency":"monthly","period_code_regex":"^(0[1-9]|1[0-2])[0-9]{4}$","expected_periods_per_year":12}',
- true,2023,2026),
-('population','Население','region_metric',NULL,NULL,NULL,NULL,NULL,NULL,false,2023,2026),
-('average_salary','Среднемесячная заработная плата','region_metric',NULL,NULL,NULL,NULL,NULL,NULL,false,2023,2026),
-('grp','Валовой региональный продукт','region_metric',NULL,NULL,NULL,NULL,NULL,NULL,false,2023,2026),
-('agriculture','Сельское хозяйство','cube',NULL,NULL,NULL,NULL,NULL,NULL,false,2023,2026),
-('industry','Промышленность','cube',NULL,NULL,NULL,NULL,NULL,NULL,false,2023,2026),
-('trade','Торговля','cube',NULL,NULL,NULL,NULL,NULL,NULL,false,2023,2026),
-('construction','Строительство','cube',NULL,NULL,NULL,NULL,NULL,NULL,false,2023,2026)
+ true,2023,2100),
+('population','Население','region_metric',NULL,NULL,NULL,NULL,NULL,NULL,false,2023,2100),
+('average_salary','Среднемесячная заработная плата','region_metric',NULL,NULL,NULL,NULL,NULL,NULL,false,2023,2100),
+('grp','Валовой региональный продукт','region_metric',NULL,NULL,NULL,NULL,NULL,NULL,false,2023,2100),
+('agriculture','Сельское хозяйство','cube',NULL,NULL,NULL,NULL,NULL,NULL,false,2023,2100),
+('industry','Промышленность','cube',NULL,NULL,NULL,NULL,NULL,NULL,false,2023,2100),
+('trade','Торговля','cube',NULL,NULL,NULL,NULL,NULL,NULL,false,2023,2100),
+('construction','Строительство','cube',NULL,NULL,NULL,NULL,NULL,NULL,false,2023,2100)
 ON CONFLICT (indicator_key) DO NOTHING;
 
 CREATE OR REPLACE VIEW taldau.metadata_enabled_indicators AS
@@ -311,6 +311,9 @@ CREATE TABLE IF NOT EXISTS taldau.gold_fact_observations (
       REFERENCES taldau.gold_dim_period(indicator_key,reporting_period),
     UNIQUE(indicator_key,reporting_period,coordinates)
 );
+
+CREATE INDEX IF NOT EXISTS gold_fact_observations_lookup_idx
+    ON taldau.gold_fact_observations (indicator_key, coordinates, reporting_period) INCLUDE (value);
 
 CREATE OR REPLACE FUNCTION taldau.generic_bigint(t text) RETURNS bigint
 LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$

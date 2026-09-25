@@ -62,7 +62,7 @@ def main() -> None:
         if args.action in ("status", "snapshot"):
             conn.set_session(readonly=True, isolation_level="REPEATABLE READ")
         if args.action == "migrate":
-            names = ["010_multi_indicator_framework.sql", "011_indicator_registry_sources.sql"]
+            names = ["010_multi_indicator_framework.sql", "011_indicator_registry_sources.sql", "012_incremental_refresh.sql"]
             with conn:
                 with conn.cursor() as cur:
                     for name in names:
@@ -70,7 +70,7 @@ def main() -> None:
                         cur.execute(path.read_text(encoding="utf-8"))
             result = {"migrations": names, "http_requests": 0}
         elif args.action == "prepare":
-            result = create_batch(conn, args.batch_id, resume_failed=args.resume_failed)
+            result = create_batch(conn, args.batch_id, year_start=2023, year_end=2026, resume_failed=args.resume_failed)
         elif args.action == "status":
             result = batch_summary(conn, args.batch_id)
         elif args.action == "snapshot":
@@ -79,7 +79,7 @@ def main() -> None:
             result = {"snapshot_id": args.snapshot_id,
                       "published_rows": publish_snapshot(conn, args.snapshot_id)}
         else:
-            create_batch(conn, args.batch_id, resume_failed=args.resume_failed)
+            create_batch(conn, args.batch_id, year_start=2023, year_end=2026, resume_failed=args.resume_failed)
             launch(args.batch_id, args.resume_failed)
             result = {"batch_id": args.batch_id, "airflow_triggered": True}
         rendered = json.dumps(result, ensure_ascii=False, indent=2, default=str)

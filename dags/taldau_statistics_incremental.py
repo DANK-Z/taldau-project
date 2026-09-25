@@ -8,4 +8,4 @@ if _DAG_DIR not in sys.path:
 
 from taldau_elt.orchestration import build_statistics_dag
 
-taldau_statistics_2023_2026 = build_statistics_dag("taldau_statistics_2023_2026", incremental=False)
+taldau_statistics_incremental = build_statistics_dag("taldau_statistics_incremental", incremental=True)

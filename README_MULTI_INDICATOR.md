@@ -5,6 +5,11 @@ One manual batch freezes one independent snapshot per enabled indicator, then ru
 chunk waves through the shared `taldau_api` pool. The DAG ends after per-indicator validation,
 diagnostics and a batch summary. It never publishes automatically.
 
+`taldau_statistics_incremental` is the separate, initially paused monthly entry point. It refreshes
+only the logical run year by default and supports explicit backfills. See
+[the incremental operations guide](README_INCREMENTAL.md) for parameters, first launch, recovery,
+publication checks and rollout. Both entry points use `taldau_elt/orchestration.py`.
+
 ## Registry
 
 `taldau.metadata_indicator_registry` is authoritative. `taldau.metadata_enabled_indicators` exposes only
@@ -53,8 +58,10 @@ idempotent. They do not drop schemas or legacy objects. The authoritative mappin
 `coordinate_hash` supplies a deterministic indexed key. The unique constraints also compare the full
 JSONB value, so a hash is not treated as proof of equality. NUMERIC values remain exact.
 
-The old `inv_*` tables, functions, reports and three DAG IDs remain available as deprecated compatibility
-paths. `public.bns_*` is external and migration 010 never changes it.
+The old `inv_*` tables, functions and reports remain available as deprecated compatibility paths.
+The three legacy DAG files (`taldau_pipeline`, `taldau_inv_fixed_assets`,
+`taldau_inv_fixed_assets_2025`) have been removed from active discovery; their source remains in Git
+history. `public.bns_*` is external and migration 010 never changes it.
 
 ## Snapshots, resume and migration
 
@@ -95,3 +102,9 @@ After validation and review, publication is explicit and snapshot-scoped:
 
 `taldau.publish_snapshot` validates again and replaces only the indicator/year scope inside one database
 transaction. Any Silver/Gold count or value mismatch raises and rolls back both layers.
+
+Migration `012_incremental_refresh.sql` extends the eight enabled registry horizons to the existing
+generic SQL domain limit (2100), adds durable incremental batch ownership and source-period cutoff
+filtering, and declares `gold_fact_observations_lookup_idx`. Frozen historical snapshots and the
+published `taldau-statistics-2023-2026-prod-v2` batch are not modified. Fresh bootstrap uses the same
+registry horizon and index. There is no annual code or migration change for 2027, 2028, etc.

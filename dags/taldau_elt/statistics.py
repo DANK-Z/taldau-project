@@ -9,8 +9,10 @@ import json
 import logging
 import re
 import uuid
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from psycopg2.extras import Json, RealDictCursor
 
@@ -18,6 +20,32 @@ from taldau_elt.loader import BronzeLoader, request_hash, tree_params
 
 LOG = logging.getLogger(__name__)
 WAVE_SIZE = 128
+MIN_YEAR = 2023
+MAX_YEAR = 2100  # Matches the generic SQL framework's supported date domain.
+INCREMENTAL_OWNER = "taldau_statistics_incremental"
+
+
+def validate_year_scope(start: int, end: int) -> None:
+    if type(start) is not int or type(end) is not int or not MIN_YEAR <= start <= end <= MAX_YEAR:
+        raise ValueError(f"Supported batch scope is {MIN_YEAR}..{MAX_YEAR}; year_start must not exceed year_end")
+
+
+def incremental_request(params: dict, logical_date: datetime, run_id: str) -> dict:
+    """Stable scope and identity; retries and continuation waves keep the original snapshot."""
+    local = logical_date.astimezone(ZoneInfo("Asia/Almaty"))
+    start, end = params.get("year_start"), params.get("year_end")
+    if (start is None) != (end is None):
+        raise ValueError("Specify both year_start and year_end for a backfill")
+    start, end = (local.year, local.year) if start is None else (start, end)
+    validate_year_scope(start, end)
+    batch_id = params.get("batch_id") or (
+        "taldau-inc-" + local.strftime("%Y%m%dT%H%M%S") + "-"
+        + hashlib.sha256((logical_date.isoformat() + "|" + run_id).encode()).hexdigest()[:24])
+    _safe_id(batch_id)
+    if params.get("resume_failed") and not params.get("batch_id"):
+        raise ValueError("resume_failed requires the original batch_id")
+    return {"batch_id": batch_id, "year_start": start, "year_end": end,
+            "source_as_of": local.date().isoformat()}
 
 
 def _safe_id(value: str, maximum: int = 100) -> str:
@@ -56,24 +84,41 @@ def _snapshot_name(indicator_key: str, start: int, end: int, batch_id: str) -> s
     return f"{indicator_key}-{start}-{end}-{suffix}"
 
 
-def create_batch(conn: Any, batch_id: str, *, year_start: int = 2023, year_end: int = 2026,
+def create_batch(conn: Any, batch_id: str, *, year_start: int = MIN_YEAR, year_end: int | None = None,
                  snapshot_overrides: dict[str, str] | None = None,
-                 resume_failed: bool = False) -> dict:
+                 resume_failed: bool = False, source_as_of: str | None = None,
+                 orchestration_key: str | None = None) -> dict:
     """Create one independent frozen snapshot per configured indicator without extraction."""
     _safe_id(batch_id)
-    if not 2023 <= year_start <= year_end <= 2026:
-        raise ValueError("Supported batch scope is 2023..2026")
+    if year_end is None:
+        year_end = datetime.now(ZoneInfo("Asia/Almaty")).year
+    validate_year_scope(year_start, year_end)
+    if source_as_of is not None:
+        date.fromisoformat(source_as_of)
     indicators = enabled_indicators(conn)
     overrides = snapshot_overrides or {}
     snapshot_ids: list[str] = []
     with conn:
         with conn.cursor() as cur:
+            if orchestration_key:
+                # Session-free ownership survives gaps between Airflow continuation runs.
+                cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (orchestration_key,))
+                cur.execute("SELECT batch_id FROM taldau.metadata_batch_owners WHERE owner_key=%s FOR UPDATE",
+                            (orchestration_key,))
+                owner = cur.fetchone()
+                if owner and owner[0] != batch_id:
+                    raise RuntimeError(f"Incremental batch {owner[0]} must finish or be resumed first")
             cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", ("batch:" + batch_id,))
             cur.execute("SELECT year_start,year_end FROM taldau.bronze_batches WHERE batch_id=%s", (batch_id,))
             existing = cur.fetchone()
             if existing and existing != (year_start, year_end):
                 raise ValueError("Batch year scope is immutable")
             if existing:
+                if orchestration_key:
+                    cur.execute("""SELECT count(*) FROM taldau.bronze_snapshots
+                        WHERE batch_id=%s AND NOT (source_config ? 'incremental_as_of')""", (batch_id,))
+                    if cur.fetchone()[0]:
+                        raise ValueError("Historical batches cannot be resumed by the incremental DAG")
                 cur.execute("SELECT indicator_key,snapshot_id FROM taldau.bronze_snapshots WHERE batch_id=%s ORDER BY indicator_key",
                             (batch_id,))
                 frozen = dict(cur.fetchall())
@@ -88,7 +133,11 @@ def create_batch(conn: Any, batch_id: str, *, year_start: int = 2023, year_end: 
                     cur.execute("""UPDATE taldau.bronze_chunks SET state='queued',lease_token=NULL,lease_until=NULL,last_error=NULL
                         WHERE snapshot_id IN (SELECT snapshot_id FROM taldau.bronze_snapshots WHERE batch_id=%s)
                           AND state='failed'""", (batch_id,))
-                cur.execute("UPDATE taldau.bronze_batches SET state='loading',last_error=NULL WHERE batch_id=%s", (batch_id,))
+                cur.execute("""UPDATE taldau.bronze_batches SET state='loading',last_error=NULL
+                    WHERE batch_id=%s AND state NOT IN ('validated','published')""", (batch_id,))
+                if orchestration_key:
+                    cur.execute("""INSERT INTO taldau.metadata_batch_owners(owner_key,batch_id)
+                        VALUES(%s,%s) ON CONFLICT(owner_key) DO NOTHING""", (orchestration_key, batch_id))
                 return {"batch_id": batch_id, "snapshot_ids": list(frozen.values()),
                         "indicator_count": len(frozen), "already_exists": True, "http_requests": 0}
             if not indicators:
@@ -100,7 +149,9 @@ def create_batch(conn: Any, batch_id: str, *, year_start: int = 2023, year_end: 
                 VALUES(%s,%s,%s) ON CONFLICT(batch_id) DO NOTHING""", (batch_id, year_start, year_end))
             for indicator in indicators:
                 key = indicator["indicator_key"]
-                config = indicator["source_config"]
+                config = dict(indicator["source_config"])
+                if source_as_of:
+                    config["incremental_as_of"] = source_as_of
                 indicator_start = max(year_start, indicator["year_start"])
                 indicator_end = min(year_end, indicator["year_end"])
                 if indicator_start > indicator_end:
@@ -137,6 +188,9 @@ def create_batch(conn: Any, batch_id: str, *, year_start: int = 2023, year_end: 
             if not snapshot_ids:
                 raise ValueError("No enabled indicator overlaps the requested year scope")
             cur.execute("UPDATE taldau.bronze_batches SET state='loading',last_error=NULL WHERE batch_id=%s", (batch_id,))
+            if orchestration_key:
+                cur.execute("INSERT INTO taldau.metadata_batch_owners(owner_key,batch_id) VALUES(%s,%s)",
+                            (orchestration_key, batch_id))
     return {"batch_id": batch_id, "snapshot_ids": snapshot_ids, "indicator_count": len(snapshot_ids),
             "http_requests": 0}
 
@@ -268,7 +322,12 @@ def discover_snapshot(conn: Any, snapshot_id: str, *, allow_http: bool) -> dict:
                     expected_chunks=(SELECT count(*) FROM taldau.bronze_chunks WHERE snapshot_id=%s)
                     WHERE snapshot_id=%s RETURNING expected_chunks""", (snapshot_id, snapshot_id))
                 chunks = cur.fetchone()[0]
-        return {"snapshot_id": snapshot_id, "chunks": chunks, "http_requests": loader.http_count}
+        with conn.cursor() as cur:
+            cur.execute("""SELECT DISTINCT period_code FROM taldau.bronze_snapshot_available_periods
+                WHERE snapshot_id=%s ORDER BY period_code""", (snapshot_id,))
+            periods = [row[0] for row in cur.fetchall()]
+        return {"snapshot_id": snapshot_id, "chunks": chunks, "http_requests": loader.http_count,
+                "available_periods": periods}
     except Exception as exc:
         conn.rollback()
         with conn:
@@ -413,7 +472,10 @@ def validate_batch(conn: Any, batch_id: str) -> dict:
                 count(*) FILTER(WHERE state='failed'),count(*)
                 FROM taldau.bronze_snapshots WHERE batch_id=%s""", (batch_id,))
             valid, failed, total = cur.fetchone()
-            state = "validated" if valid == total else "failed" if valid == 0 else "partially_validated"
+            cur.execute("SELECT count(*) FROM taldau.bronze_snapshots WHERE batch_id=%s AND state='published'", (batch_id,))
+            published = cur.fetchone()[0]
+            state = ("published" if total and published == total else "validated" if total and valid == total
+                     else "failed" if valid == 0 else "partially_validated")
             cur.execute("UPDATE taldau.bronze_batches SET state=%s,completed_at=now() WHERE batch_id=%s", (state, batch_id))
     return {"batch_id": batch_id, "state": state, "validated": valid, "failed": failed, "results": results}
 
@@ -424,6 +486,57 @@ def publish_snapshot(conn: Any, snapshot_id: str) -> int:
         with conn.cursor() as cur:
             cur.execute("SELECT taldau.publish_snapshot(%s)", (snapshot_id,))
             return cur.fetchone()[0]
+
+
+def publish_batch(conn: Any, batch_id: str, *, auto_publish: bool = False) -> dict:
+    """Publish serially through the existing SQL function, in ONE batch transaction.
+
+    Count/content reconciliation runs inside publish_snapshot before commit. A failure
+    in any indicator rolls back every publication and the batch's published state.
+    """
+    if auto_publish is not True:
+        return {"batch_id": batch_id, "published": False}
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_xact_lock(hashtextextended('taldau.generic_publication',0))")
+            cur.execute("SELECT state FROM taldau.bronze_batches WHERE batch_id=%s FOR UPDATE", (batch_id,))
+            batch = cur.fetchone()
+            if not batch or batch[0] not in ("validated", "published"):
+                raise ValueError("Batch validation must complete successfully before publication")
+            cur.execute("""SELECT snapshot_id,state,validated_at FROM taldau.bronze_snapshots
+                WHERE batch_id=%s ORDER BY indicator_key FOR UPDATE""", (batch_id,))
+            snapshots = cur.fetchall()
+            if not snapshots or any(state not in ("validated", "published") or at is None
+                                    for _, state, at in snapshots):
+                raise ValueError("Every snapshot must be validated or published")
+            for sid, _, _ in snapshots:
+                cur.execute("""SELECT count(*),coalesce(sum(violations),0)
+                    FROM taldau.quality_snapshot_checks WHERE snapshot_id=%s AND severity='blocking'""", (sid,))
+                checks, violations = cur.fetchone()
+                cur.execute("""SELECT count(*) FROM taldau.staging_observation_cells
+                    WHERE snapshot_id=%s AND value_status IN ('invalid','missing')""", (sid,))
+                invalid = cur.fetchone()[0]
+                if not checks or violations or invalid:
+                    raise ValueError(f"Publication blocked by quality violations: {sid}")
+            rows = {}
+            for sid, _, _ in snapshots:
+                # Do not call the Python wrapper: its context manager commits per indicator.
+                cur.execute("SELECT taldau.publish_snapshot(%s)", (sid,))
+                rows[sid] = cur.fetchone()[0]
+    return {"batch_id": batch_id, "published": True, "rows": rows}
+
+
+def finish_incremental_batch(conn: Any, batch_id: str) -> None:
+    """Release ownership only after successful validation, diagnostics and optional publication."""
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (INCREMENTAL_OWNER,))
+            cur.execute("SELECT state FROM taldau.bronze_batches WHERE batch_id=%s FOR UPDATE", (batch_id,))
+            row = cur.fetchone()
+            if not row or row[0] not in ("validated", "published"):
+                raise ValueError("Incremental batch has failed validation; resume the same batch")
+            cur.execute("DELETE FROM taldau.metadata_batch_owners WHERE owner_key=%s AND batch_id=%s",
+                        (INCREMENTAL_OWNER, batch_id))
 
 
 def snapshot_summary(conn: Any, snapshot_id: str) -> dict:
