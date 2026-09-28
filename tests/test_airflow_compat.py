@@ -267,13 +267,15 @@ class AirflowRuntimeTests(unittest.TestCase):
 
     def test_incremental_authorization_freezes_year_and_continuation_conf(self):
         import pendulum
+        from airflow.utils.types import DagRunType
         from unittest.mock import MagicMock
         dag = self.bag.dags['taldau_statistics_incremental']
         authorize = dag.get_task('authorize_batch').python_callable
         module = sys.modules[authorize.__module__]
         params = dict(dag.params)
         context = {'params': params, 'logical_date': pendulum.datetime(2027, 1, 20, 7, tz='Asia/Almaty'),
-                   'run_id': 'scheduled__2027-01-20T02:00:00+00:00', 'ti': Mock()}
+                   'run_id': 'scheduled__2027-01-20T02:00:00+00:00', 'ti': Mock(),
+                   'dag_run': Mock(conf={}, run_type=DagRunType.SCHEDULED)}
         with patch.object(module, 'connection', return_value=MagicMock()), \
              patch('taldau_elt.statistics.create_batch', return_value={'batch_id': 'generated'}) as create, \
              patch('airflow.operators.python.get_current_context', return_value=context):
@@ -281,17 +283,20 @@ class AirflowRuntimeTests(unittest.TestCase):
         self.assertEqual((create.call_args.kwargs['year_start'], create.call_args.kwargs['year_end']), (2027, 2027))
         self.assertEqual(create.call_args.kwargs['source_as_of'], '2027-01-20')
         self.assertEqual(create.call_args.kwargs['orchestration_key'], dag.dag_id)
+        self.assertTrue(context['ti'].xcom_push.call_args.kwargs['value']['effective_auto_publish'])
 
         context['ti'].xcom_pull.side_effect = lambda task_ids, key=None: (
-            {'year_start': 2027, 'year_end': 2027} if key == 'scope' else 'generated')
+            {'year_start': 2027, 'year_end': 2027, 'effective_auto_publish': True} if key == 'scope' else 'generated')
         import copy
         continuation = copy.deepcopy(dag.get_task('continue_batch'))
         continuation.render_template_fields(context)
         self.assertEqual(continuation.conf, {'batch_id': 'generated', 'allow_extraction': True,
-            'resume_failed': False, 'year_start': 2027, 'year_end': 2027, 'auto_publish': False})
+            'resume_failed': False, 'year_start': 2027, 'year_end': 2027,
+            'auto_publish': True, 'effective_auto_publish': True})
 
     def test_incremental_resume_keeps_stored_scope_after_year_rollover(self):
         import pendulum
+        from airflow.utils.types import DagRunType
         from unittest.mock import MagicMock
         dag = self.bag.dags['taldau_statistics_incremental']
         authorize = dag.get_task('authorize_batch').python_callable
@@ -300,13 +305,141 @@ class AirflowRuntimeTests(unittest.TestCase):
         conn.cursor.return_value.__enter__.return_value.fetchone.return_value = (2027, 2027)
         context = {'params': {**dict(dag.params), 'batch_id': 'existing', 'resume_failed': True},
                    'logical_date': pendulum.datetime(2028, 1, 20, tz='Asia/Almaty'),
-                   'run_id': 'manual__resume', 'ti': Mock()}
+                   'run_id': 'manual__resume', 'ti': Mock(),
+                   'dag_run': Mock(conf={}, run_type=DagRunType.MANUAL)}
         with patch.object(module, 'connection', return_value=conn), \
              patch('taldau_elt.statistics.create_batch', return_value={'batch_id': 'existing'}) as create, \
              patch('airflow.operators.python.get_current_context', return_value=context):
             authorize()
         self.assertEqual((create.call_args.kwargs['year_start'], create.call_args.kwargs['year_end']), (2027, 2027))
         self.assertTrue(create.call_args.kwargs['resume_failed'])
+
+    def test_publication_policy_uses_run_type_and_explicit_conf_not_ui_defaults(self):
+        from airflow.utils.types import DagRunType
+        from taldau_elt.orchestration import effective_auto_publish
+        cases = [(DagRunType.SCHEDULED, {}, True),
+                 (DagRunType.MANUAL, {}, False),
+                 (DagRunType.MANUAL, {'auto_publish': True}, True),
+                 (DagRunType.MANUAL, {'auto_publish': False}, False),
+                 (DagRunType.SCHEDULED, {'auto_publish': False}, False),
+                 (DagRunType.BACKFILL_JOB, {}, False)]
+        for kind, conf, expected in cases:
+            # Airflow's ORM can return the enum's persisted string value.
+            for persisted in (kind, kind.value):
+                with self.subTest(kind=persisted, conf=conf):
+                    context = {'dag_run': Mock(run_type=persisted, conf=conf),
+                               'params': {'auto_publish': not expected}, 'ti': Mock()}
+                    context['ti'].xcom_pull.return_value = None
+                    self.assertIs(effective_auto_publish(context), expected)
+
+    def test_continuation_inherits_decision_through_authorization_publish_and_retry(self):
+        import copy
+        import pendulum
+        from airflow.utils.types import DagRunType
+        from unittest.mock import MagicMock
+        dag = self.bag.dags['taldau_statistics_incremental']
+        authorize = dag.get_task('authorize_batch').python_callable
+        publish = dag.get_task('publish_batch').python_callable
+        module = sys.modules[authorize.__module__]
+        for expected in (True, False):
+            scope = {'year_start': 2027, 'year_end': 2027, 'effective_auto_publish': expected}
+            parent_ti = Mock()
+            parent_ti.xcom_pull.side_effect = lambda task_ids, key=None: scope if key == 'scope' else 'original'
+            continuation = copy.deepcopy(dag.get_task('continue_batch'))
+            continuation.render_template_fields({'ti': parent_ti, 'params': {'auto_publish': not expected}})
+            conf = continuation.conf
+            self.assertIs(conf['effective_auto_publish'], expected)
+            self.assertIs(conf['auto_publish'], expected)
+            child_ti = Mock()
+            child_ti.xcom_pull.return_value = None
+            context = {'dag_run': Mock(run_type=DagRunType.MANUAL, conf=conf),
+                       'params': {**dict(dag.params), **conf, 'auto_publish': not expected},
+                       'logical_date': pendulum.datetime(2027, 1, 20, tz='Asia/Almaty'),
+                       'run_id': 'original__wave__fixture', 'ti': child_ti}
+            conn = MagicMock()
+            conn.cursor.return_value.__enter__.return_value.fetchone.return_value = (2027, 2027)
+            with patch.object(module, 'connection', return_value=conn), \
+                 patch('taldau_elt.statistics.create_batch', return_value={'batch_id': 'original'}), \
+                 patch('airflow.operators.python.get_current_context', return_value=context), \
+                 patch('taldau_elt.statistics.publish_batch') as publish_sql:
+                # Retry may clear XCom. The durable continuation conf retains the decision.
+                for _ in range(2):
+                    child_ti.xcom_pull.return_value = None
+                    authorize()
+                    self.assertEqual(child_ti.xcom_push.call_args.kwargs['value'], scope)
+                child_ti.xcom_pull.return_value = scope
+                context['dag_run'].run_type = DagRunType.SCHEDULED
+                context['dag_run'].conf = {'auto_publish': not expected}
+                authorize()  # A retained authorized scope also wins over re-evaluation.
+                self.assertEqual(child_ti.xcom_push.call_args.kwargs['value'], scope)
+                publish('original')
+                publish('original')
+                self.assertEqual(publish_sql.call_count, 2)
+                publish_sql.assert_called_with(conn, 'original', auto_publish=expected)
+            # Every following wave carries the authorized boolean again.
+            child_ti.xcom_pull.side_effect = lambda task_ids, key=None: scope if key == 'scope' else 'original'
+            following = copy.deepcopy(dag.get_task('continue_batch'))
+            following.render_template_fields(context)
+            self.assertIs(following.conf['effective_auto_publish'], expected)
+
+    def test_initial_authorization_retries_reproduce_same_decision_after_xcom_clear(self):
+        import pendulum
+        from airflow.utils.types import DagRunType
+        from unittest.mock import MagicMock
+        dag = self.bag.dags['taldau_statistics_incremental']
+        authorize = dag.get_task('authorize_batch').python_callable
+        module = sys.modules[authorize.__module__]
+        for kind, conf, expected in ((DagRunType.SCHEDULED, {}, True), (DagRunType.MANUAL, {}, False),
+                                     (DagRunType.MANUAL, {'auto_publish': True}, True),
+                                     (DagRunType.MANUAL, {'auto_publish': False}, False)):
+            ti = Mock()
+            ti.xcom_pull.return_value = None
+            context = {'dag_run': Mock(run_type=kind, conf=conf), 'params': {**dict(dag.params), **conf},
+                       'logical_date': pendulum.datetime(2027, 1, 20, tz='Asia/Almaty'),
+                       'run_id': 'initial', 'ti': ti}
+            with patch.object(module, 'connection', return_value=MagicMock()), \
+                 patch('taldau_elt.statistics.create_batch', return_value={'batch_id': 'original'}), \
+                 patch('airflow.operators.python.get_current_context', return_value=context):
+                for _ in range(2):
+                    authorize()
+                    self.assertIs(ti.xcom_push.call_args.kwargs['value']['effective_auto_publish'], expected)
+
+    def test_invalid_decision_or_missing_scope_blocks_publication_before_connection(self):
+        from airflow.utils.types import DagRunType
+        from taldau_elt.orchestration import effective_auto_publish
+        for conf in ({'auto_publish': 'false'}, {'auto_publish': 1},
+                     {'effective_auto_publish': True},
+                     {'batch_id': 'original', 'effective_auto_publish': True, 'auto_publish': False}):
+            with self.subTest(conf=conf), self.assertRaises(ValueError):
+                effective_auto_publish({'ti': Mock(), 'dag_run': Mock(conf=conf, run_type=DagRunType.MANUAL)})
+        publish = self.bag.dags['taldau_statistics_incremental'].get_task('publish_batch').python_callable
+        module = sys.modules[publish.__module__]
+        for scope in (None, {}, {'effective_auto_publish': 'true'}):
+            ti = Mock()
+            ti.xcom_pull.return_value = scope
+            with patch.object(module, 'connection') as connect, \
+                 patch('airflow.operators.python.get_current_context', return_value={'ti': ti}), \
+                 self.assertRaisesRegex(ValueError, 'Missing authorized'):
+                publish('original')
+            connect.assert_not_called()
+
+    def test_historical_never_resolves_scheduled_publication(self):
+        from airflow.utils.types import DagRunType
+        dag = self.bag.dags['taldau_statistics_2023_2026']
+        authorize = dag.get_task('authorize_batch').python_callable
+        module = sys.modules[authorize.__module__]
+        for kind in (DagRunType.SCHEDULED, DagRunType.MANUAL):
+            ti = Mock()
+            context = {'params': {'batch_id': 'history', 'allow_extraction': True, 'auto_publish': True},
+                       'dag_run': Mock(run_type=kind, conf={'auto_publish': True}), 'ti': ti}
+            with patch.object(module, 'connection', return_value=Mock()), \
+                 patch.object(module, 'effective_auto_publish', side_effect=AssertionError('Historical publication forbidden')), \
+                 patch('taldau_elt.statistics.create_batch', return_value={'batch_id': 'history'}), \
+                 patch('airflow.operators.python.get_current_context', return_value=context):
+                authorize()
+            ti.xcom_push.assert_not_called()
+            self.assertNotIn('publish_batch', dag.task_ids)
+            self.assertNotIn('effective_auto_publish', dag.get_task('continue_batch').conf)
 
     def test_january_timetable_logical_date_is_january(self):
         import pendulum

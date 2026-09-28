@@ -18,6 +18,32 @@ def connection():
                             user=item.login, password=item.password, connect_timeout=10)
 
 
+def effective_auto_publish(context):
+    """Resolve once at authorization; merged Params cannot distinguish explicit false."""
+    from airflow.utils.types import DagRunType
+
+    scope = context["ti"].xcom_pull(task_ids="authorize_batch", key="scope")
+    if isinstance(scope, dict) and "effective_auto_publish" in scope:
+        value = scope["effective_auto_publish"]
+    else:
+        run = context["dag_run"]
+        conf = run.conf or {}
+        if "effective_auto_publish" in conf:
+            if not conf.get("batch_id"):
+                raise ValueError("Inherited publication decision requires the original batch_id")
+            value = conf["effective_auto_publish"]
+            if "auto_publish" in conf and (type(conf["auto_publish"]) is not bool
+                                           or conf["auto_publish"] != value):
+                raise ValueError("auto_publish conflicts with inherited effective_auto_publish")
+        elif "auto_publish" in conf:
+            value = conf["auto_publish"]
+        else:
+            value = run.run_type == DagRunType.SCHEDULED
+    if type(value) is not bool:
+        raise ValueError("effective_auto_publish must be a boolean")
+    return value
+
+
 def build_statistics_dag(dag_id: str, *, incremental: bool = False):
     params = {"batch_id": Param("", type="string"),
               "allow_extraction": Param(incremental, type="boolean"),
@@ -46,6 +72,7 @@ def build_statistics_dag(dag_id: str, *, incremental: bool = False):
             params = context["params"]
             if params.get("allow_extraction") is not True:
                 raise ValueError("Extraction is disabled. Set allow_extraction=true explicitly.")
+            decision = effective_auto_publish(context) if incremental else False
             conn = connection()
             try:
                 if incremental:
@@ -63,7 +90,8 @@ def build_statistics_dag(dag_id: str, *, incremental: bool = False):
                     result = create_batch(conn, **request, orchestration_key=INCREMENTAL_OWNER,
                                           resume_failed=params.get("resume_failed") is True)
                     context["ti"].xcom_push(key="scope", value={
-                        "year_start": request["year_start"], "year_end": request["year_end"]})
+                        "year_start": request["year_start"], "year_end": request["year_end"],
+                        "effective_auto_publish": decision})
                 else:
                     result = create_batch(conn, params["batch_id"], year_start=2023, year_end=2026,
                         snapshot_overrides=params.get("snapshot_overrides") or {},
@@ -182,10 +210,12 @@ def build_statistics_dag(dag_id: str, *, incremental: bool = False):
         def publish(batch_id):
             from airflow.operators.python import get_current_context
             from taldau_elt.statistics import publish_batch
+            scope = get_current_context()["ti"].xcom_pull(task_ids="authorize_batch", key="scope")
+            if not isinstance(scope, dict) or type(scope.get("effective_auto_publish")) is not bool:
+                raise ValueError("Missing authorized effective_auto_publish; rerun authorize_batch")
             conn = connection()
             try:
-                publish_batch(conn, batch_id,
-                              auto_publish=get_current_context()["params"].get("auto_publish") is True)
+                publish_batch(conn, batch_id, auto_publish=scope["effective_auto_publish"])
             finally:
                 conn.close()
 
@@ -205,7 +235,8 @@ def build_statistics_dag(dag_id: str, *, incremental: bool = False):
             continuation_conf.update(
                 year_start="{{ ti.xcom_pull(task_ids='authorize_batch', key='scope')['year_start'] }}",
                 year_end="{{ ti.xcom_pull(task_ids='authorize_batch', key='scope')['year_end'] }}",
-                auto_publish="{{ params.auto_publish }}")
+                auto_publish="{{ ti.xcom_pull(task_ids='authorize_batch', key='scope')['effective_auto_publish'] }}",
+                effective_auto_publish="{{ ti.xcom_pull(task_ids='authorize_batch', key='scope')['effective_auto_publish'] }}")
         else:
             continuation_conf["snapshot_overrides"] = "{{ params.snapshot_overrides }}"
         continuation = SkipExistingDagRunOperator(

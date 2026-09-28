@@ -10,7 +10,7 @@
 | Диапазон | Всегда 2023–2026 | Год logical date в Asia/Almaty либо явный диапазон |
 | Расписание | Ручной запуск | 20-го числа, 07:00 Asia/Almaty (`0 7 20 * *`) |
 | Первый импорт | На паузе | На паузе |
-| Публикация | Только отдельным действием | Выключена, включается `auto_publish=true` |
+| Публикация | Только отдельным действием | Scheduled — автоматически после проверок; manual — только при явном `auto_publish=true` |
 | Извлечение по умолчанию | Требует `allow_extraction=true` | Разрешено после ручного включения DAG |
 
 Оба DAG используют общую оркестрацию: discovery → dynamic mapping волн до 128 chunk ID →
@@ -31,16 +31,69 @@ validation → diagnostics. Pool `taldau_api` должен иметь ровно
 | `batch_id` | `""` | Автоматически: локальная logical date + SHA-256 от logical date/run ID |
 | `resume_failed` | `false` | Возобновить исходный batch; complete chunks не повторять |
 | `allow_extraction` | `true` | При `false` authorization завершается до HTTP |
-| `auto_publish` | `false` | Разрешает публикацию только после успешных проверок |
+| `auto_publish` | `false` | Безопасное значение UI для manual; явное значение в conf переопределяет начальную политику |
 
 Поддерживаемый домен — целые годы 2023–2100, в соответствии с существующими generic SQL CHECK.
 `year_start > year_end`, один заданный конец диапазона и годы вне домена отклоняются.
 Это техническая граница представления, а не ежегодно обновляемый горизонт registry.
 
 Идентификатор batch стабилен для retry одного run, различается для разных run ID и содержит только
-`A-Za-z0-9_-`. Continuation передаёт уже полученный ID через XCom, оба года и `auto_publish`.
+`A-Za-z0-9_-`. Continuation передаёт уже полученный ID через XCom, оба года и сохранённое `effective_auto_publish`
+(также дублируется в `auto_publish` для совместимости).
 Она не создаёт новый snapshot и не сбрасывает существующий DAG run. Не используйте ID исторического
 batch в incremental DAG: такая попытка отклоняется.
+
+## Автоматическая публикация scheduled incremental
+
+Param `auto_publish` остаётся `false`: UI ручного запуска безопасен. В `authorize_batch`
+вычисляется отдельное булево `effective_auto_publish`, которое сохраняется в XCom `scope`
+вместе с годами. Используется официальный `DagRunType.SCHEDULED` из `airflow.utils.types`
+(Airflow 2.9.2); run ID, подписи UI и текущее время не используются для определения типа запуска.
+
+| Запуск | effective_auto_publish |
+|---|---|
+| Scheduled incremental, пустой conf | `true` |
+| Manual incremental без параметра | `false` |
+| Manual incremental с `auto_publish=true` | `true` |
+| Manual incremental с `auto_publish=false` | `false` |
+| Continuation, включая run_type=manual | Наследует исходное решение |
+| Historical scheduled/manual | Автоматическая публикация отсутствует |
+
+Приоритет при авторизации: уже сохранённое значение в scope текущего run → унаследованное
+`effective_auto_publish` в conf → явно заданное `auto_publish` в conf → проверка
+`dag_run.run_type == DagRunType.SCHEDULED`. Для остальных типов запуска значение по умолчанию
+false. Поэтому scheduled с явно указанным `auto_publish=false` тоже не публикует. Merged Params
+не определяют начальное решение: в них default false неотличим от явно заданного false.
+
+Continuation получает оба ключа `effective_auto_publish` и `auto_publish` из авторизованного
+scope, а не из текущих Params. Унаследованный ключ требует исходный batch_id; несовпадающие явные
+ключи и значения вместо JSON boolean отклоняются. `publish_batch` читает только сохранённый scope;
+отсутствующий или некорректный scope вызывает ошибку до подключения к целевой БД.
+
+Retry использует сохранённый scope, когда он доступен. Airflow может очищать XCom при retry;
+тогда решение восстанавливается из неизменённых conf/run_type исходного run, а для continuation —
+из переданного булева значения. См. [официальную документацию XCom 2.9.2](https://airflow.apache.org/docs/apache-airflow/2.9.2/core-concepts/xcoms.html).
+Не изменяйте conf существующего run между попытками. Это фиксация решения внутри одной цепочки,
+а не вечный запрет на последующую ручную публикацию batch.
+
+Новый manual resume с тем же batch_id — явный новый управляющий запуск: передайте нужное
+`auto_publish=true/false`. Без параметра он безопасно выключает публикацию. Чтобы продолжить
+именно исходную цепочку с её решением, перенесите `effective_auto_publish` из scope исходного run
+и тот же batch_id (например `{"batch_id":"ORIGINAL","resume_failed":true,"effective_auto_publish":true,"auto_publish":true}`).
+Не создавайте новый batch ради resume. Проверки качества, atomic publication, no_new_periods,
+owner lock и release остаются прежними; true разрешает публикацию только после validation и diagnostics.
+
+Для доставки: после review и тестов отдельно создать commit только трёх изменённых файлов
+(`orchestration.py`, `test_airflow_compat.py`, этот README). Поставить incremental DAG на паузу и
+дождаться завершения running/queued/continuation задач. Доставить одинаковый код на scheduler и
+workers, проверить DagBag 2.9.2 и default Param=false. Миграция БД не требуется. Старые runs без
+нового scope не продолжать вслепую: явно возобновить тот же batch с выбранным auto_publish или
+дождаться их завершения до обновления. Не переавторизовывать старый scheduled run с пустым conf
+без проверки решения: новый код выберет true. Снятие с паузы теперь разрешает автоматическую
+публикацию следующих scheduled batches; сначала проверить manual false и согласованное окно.
+Откат — при остановленных задачах вернуть предыдущий код: continuation также передаёт auto_publish,
+но новые scheduled runs после отката снова используют прежнюю выключенную по умолчанию политику.
+Уже опубликованные данные откат кода не отменяет.
 
 ## Что означает bounded refresh
 
@@ -248,8 +301,8 @@ batches и не возвращать старый CHECK constraint или фун
 
 Rollback данных — отдельная проверенная операция из резервной копии либо восстановительного
 snapshot с новой revision на нужный indicator/year. Старый snapshot нельзя просто publish поверх
-новой revision: существующая защита правильно отклоняет такой rollback. До включения auto_publish
-текущие Silver/Gold не меняются.
+новой revision: существующая защита правильно отклоняет такой rollback. В manual-запусках без разрешения публикации
+текущие Silver/Gold не меняются; scheduled-запуски теперь автоматически публикуют после проверок.
 
 ## CLI: миграция 013 и resume инцидента
 
