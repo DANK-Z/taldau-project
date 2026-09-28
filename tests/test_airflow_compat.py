@@ -230,6 +230,41 @@ class AirflowRuntimeTests(unittest.TestCase):
         self.assertEqual(create.call_args.kwargs['year_end'], 2026)
         self.assertNotIn('publish_batch', dag.task_ids)
 
+    def test_diagnostics_full_report_once_and_final_metadata_only(self):
+        import os
+        import json
+        report = {'batch_id': 'fixture', 'state': 'validated', 'indicators_total': 8,
+                  'indicators_validated': 7, 'indicators_no_new_periods': 1, 'indicators_failed': 0}
+        for dag_id in ('taldau_statistics_incremental', 'taldau_statistics_2023_2026'):
+            dag = self.bag.dags[dag_id]
+            diagnostics = dag.get_task('diagnostics').python_callable
+            final = dag.get_task('final_batch_summary').python_callable
+            module = sys.modules[final.__module__]
+            with tempfile.TemporaryDirectory() as directory, \
+                 patch.dict(os.environ, {'TALDAU_REPORT_DIR': directory}), \
+                 patch.object(module, 'connection', return_value=Mock()), \
+                 patch('taldau_elt.statistics.batch_summary', return_value=report) as full, \
+                 patch('taldau_elt.statistics.batch_state_summary', return_value=report) as light, \
+                 patch('taldau_elt.statistics.finish_incremental_batch') as finish:
+                diagnostics('fixture')
+                full.assert_called_once()
+                self.assertEqual(json.loads(next(Path(directory).glob('*.json')).read_text()), report)
+                finish.assert_not_called()
+                full.side_effect = AssertionError('Full report forbidden in final task')
+                final('fixture')
+                light.assert_called_once()
+                self.assertEqual(finish.call_count, int(dag_id.endswith('incremental')))
+                # An inconsistent batch state cannot release ownership, for either DAG.
+                finish.reset_mock()
+                light.return_value = {**report, 'indicators_validated': 6, 'indicators_failed': 1}
+                with self.assertRaisesRegex(ValueError, 'incomplete or failed'):
+                    final('fixture')
+                finish.assert_not_called()
+                light.side_effect = RuntimeError('metadata unavailable')
+                with self.assertRaisesRegex(RuntimeError, 'metadata unavailable'):
+                    final('fixture')
+                finish.assert_not_called()
+
     def test_incremental_authorization_freezes_year_and_continuation_conf(self):
         import pendulum
         from unittest.mock import MagicMock

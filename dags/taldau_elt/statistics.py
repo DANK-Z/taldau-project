@@ -312,8 +312,7 @@ def discover_snapshot(conn: Any, snapshot_id: str, *, allow_http: bool) -> dict:
                         cur.execute("""UPDATE taldau.bronze_snapshots SET discovery_complete=true,
                             expected_chunks=(SELECT count(*) FROM taldau.bronze_chunks WHERE snapshot_id=%s)
                             WHERE snapshot_id=%s""", (snapshot_id, snapshot_id))
-                        cur.execute("SELECT taldau.validate_snapshot(%s)", (snapshot_id,))
-                        result = cur.fetchone()[0]
+                        result = _validate_snapshot(cur, snapshot_id)
                         return {**result, "chunks": 0, "http_requests": loader.http_count,
                                 "available_periods": []}
                 pipeline_id = "statistics_" + snapshot["indicator_key"]
@@ -460,6 +459,20 @@ def batch_wave_outcome(conn: Any, batch_id: str, selected_ids: list[int]) -> str
     return "continue" if pending else "validate"
 
 
+def _validate_snapshot(cur: Any, snapshot_id: str) -> dict:
+    cur.execute("SELECT taldau.validate_snapshot(%s)", (snapshot_id,))
+    result = cur.fetchone()[0]
+    if not result["valid"]:
+        # Failed staging cannot supply an exact period inventory (for
+        # example available source periods with zero staged cells).
+        # Record it with this validation, never on every diagnostics run.
+        cur.execute("""UPDATE taldau.quality_snapshot_checks SET details=details ||
+            jsonb_build_object('inventory_cached',true,'available_periods',
+              (SELECT count(*) FROM taldau.bronze_snapshot_available_periods WHERE snapshot_id=%s))
+            WHERE snapshot_id=%s AND check_name='empty_snapshot'""", (snapshot_id, snapshot_id))
+    return result
+
+
 def validate_batch(conn: Any, batch_id: str) -> dict:
     with conn.cursor() as cur:
         cur.execute("""SELECT snapshot_id FROM taldau.bronze_snapshots
@@ -470,8 +483,7 @@ def validate_batch(conn: Any, batch_id: str) -> dict:
         try:
             with conn:
                 with conn.cursor() as cur:
-                    cur.execute("SELECT taldau.validate_snapshot(%s)", (snapshot_id,))
-                    results.append(cur.fetchone()[0])
+                    results.append(_validate_snapshot(cur, snapshot_id))
         except Exception as exc:  # one indicator never rolls back another indicator's committed validation
             conn.rollback()
             LOG.exception("Validation failed for %s", snapshot_id)
@@ -558,47 +570,117 @@ def finish_incremental_batch(conn: Any, batch_id: str) -> None:
                         (INCREMENTAL_OWNER, batch_id))
 
 
+# One narrow scan of staging, grouped at the exact duplicate-check grain. The
+# second aggregate reads these groups, not staging or a materialized copy of cells.
+_SUMMARY_SQL = """
+WITH selected AS MATERIALIZED (
+  SELECT * FROM taldau.bronze_snapshots WHERE {scope}=%s
+), chunks AS MATERIALIZED (
+  SELECT c.snapshot_id,c.run_id,c.state FROM taldau.bronze_chunks c JOIN selected s USING(snapshot_id)
+), chunk_stats AS (
+  SELECT snapshot_id,count(*) AS total,count(*) FILTER(WHERE state='complete') AS complete,
+    count(*) FILTER(WHERE state='failed') AS failed FROM chunks GROUP BY snapshot_id
+), cell_grain AS (
+  SELECT v.snapshot_id,v.reporting_period,v.coordinates,count(*) AS staged,
+    count(*) FILTER(WHERE value_status='numeric') AS numeric,
+    count(*) FILTER(WHERE value_status='x') AS x,
+    count(*) FILTER(WHERE value_status IN ('invalid','missing')) AS invalid
+  FROM taldau.staging_observation_cells v JOIN selected s USING(snapshot_id)
+  GROUP BY v.snapshot_id,v.reporting_period,v.coordinates
+), cell_stats AS (
+  SELECT snapshot_id,sum(staged) AS staged,sum(numeric) AS numeric,sum(x) AS x,
+    sum(invalid) AS invalid,count(*) FILTER(WHERE numeric>1) AS duplicates
+  FROM cell_grain GROUP BY snapshot_id
+), runs AS (
+  SELECT snapshot_id,discovery_run_id AS run_id FROM selected
+  UNION SELECT snapshot_id,run_id FROM chunks
+), raw_stats AS (
+  SELECT runs.snapshot_id,count(*) AS total FROM runs
+  JOIN taldau.bronze_run_raw r USING(run_id) GROUP BY runs.snapshot_id
+), checks AS (
+  SELECT q.snapshot_id,jsonb_agg(to_jsonb(q) ORDER BY check_name) AS items,
+    max((q.details->>'available_periods')::bigint) FILTER(
+      WHERE check_name='empty_snapshot' AND q.details->>'inventory_cached'='true') AS cached_available
+  FROM taldau.quality_snapshot_checks q JOIN selected s USING(snapshot_id) GROUP BY q.snapshot_id
+), periods AS (
+  SELECT p.snapshot_id,count(DISTINCT period_code) AS available,
+    jsonb_agg(to_jsonb(p) ORDER BY period_code,reporting_period) AS items
+  FROM taldau.quality_period_diagnostics p JOIN selected s USING(snapshot_id) GROUP BY p.snapshot_id
+)
+SELECT jsonb_build_object(
+  'snapshot_id',s.snapshot_id,'indicator_key',s.indicator_key,'state',s.state,
+  'year_start',s.year_start,'year_end',s.year_end,'no_new_periods',s.state='no_new_periods',
+  'staged_rows',coalesce(v.staged,0),
+  'available_periods',CASE WHEN s.state='no_new_periods' THEN 0 ELSE coalesce(p.available,0) END,
+  'chunks_total',coalesce(c.total,0),'chunks_complete',coalesce(c.complete,0),
+  'chunks_failed',coalesce(c.failed,0),'raw_responses',coalesce(r.total,0),
+  'numeric_rows',coalesce(v.numeric,0),'x_rows',coalesce(v.x,0),
+  'invalid_rows',coalesce(v.invalid,0),'duplicate_keys',coalesce(v.duplicates,0),
+  'checks',coalesce(q.items,'[]'::jsonb),'periods',coalesce(p.items,'[]'::jsonb)
+), CASE WHEN s.state='failed' AND s.last_error='SQL validation failed: see taldau.quality_snapshot_checks'
+        THEN q.cached_available END
+FROM selected s LEFT JOIN chunk_stats c USING(snapshot_id)
+LEFT JOIN cell_stats v USING(snapshot_id) LEFT JOIN raw_stats r USING(snapshot_id)
+LEFT JOIN checks q USING(snapshot_id) LEFT JOIN periods p USING(snapshot_id)
+ORDER BY s.indicator_key
+"""
+
+
+def _snapshot_summaries(conn: Any, *, batch_id: str | None = None,
+                        snapshot_id: str | None = None) -> list[dict]:
+    scope, value = ("batch_id", batch_id) if batch_id is not None else ("snapshot_id", snapshot_id)
+    with conn.cursor() as cur:
+        cur.execute(_SUMMARY_SQL.format(scope=scope), (value,))
+        rows = cur.fetchall()
+        snapshots = [row[0] for row in rows]
+        # Successful validation has already recorded source periods. For unfinished
+        # or failed snapshots the CLI must still report the actual raw inventory:
+        # staging can be empty even when the source contains available periods.
+        unfinished = []
+        for row, cached_available in rows:
+            if row["state"] in ("validated", "published", "no_new_periods"):
+                continue
+            if cached_available is not None:
+                row["available_periods"] = cached_available
+            else:
+                unfinished.append(row["snapshot_id"])
+        if unfinished:
+            cur.execute("""SELECT snapshot_id,count(*) FROM taldau.bronze_snapshot_available_periods
+                WHERE snapshot_id=ANY(%s) GROUP BY snapshot_id""", (unfinished,))
+            available = dict(cur.fetchall())
+            for row in snapshots:
+                if row["snapshot_id"] in unfinished:
+                    row["available_periods"] = available.get(row["snapshot_id"], 0)
+    return snapshots
+
+
 def snapshot_summary(conn: Any, snapshot_id: str) -> dict:
-    with conn.cursor() as cur:
-        cur.execute("""WITH s AS (SELECT * FROM taldau.bronze_snapshots WHERE snapshot_id=%s),
-          chunks AS (SELECT c.* FROM taldau.bronze_chunks c JOIN s USING(snapshot_id)),
-          cells AS (SELECT v.* FROM taldau.staging_observation_cells v JOIN s USING(snapshot_id))
-        SELECT jsonb_build_object(
-          'snapshot_id',s.snapshot_id,'indicator_key',s.indicator_key,'state',s.state,
-          'year_start',s.year_start,'year_end',s.year_end,
-          'no_new_periods',s.state='no_new_periods',
-          'staged_rows',(SELECT count(*) FROM cells),
-          'available_periods',(SELECT count(*) FROM taldau.bronze_snapshot_available_periods p
-             WHERE p.snapshot_id=s.snapshot_id),
-          'chunks_total',(SELECT count(*) FROM chunks),
-          'chunks_complete',(SELECT count(*) FROM chunks WHERE state='complete'),
-          'chunks_failed',(SELECT count(*) FROM chunks WHERE state='failed'),
-          'raw_responses',(SELECT count(*) FROM taldau.bronze_run_raw r WHERE r.run_id=s.discovery_run_id
-             OR r.run_id IN (SELECT run_id FROM chunks)),
-          'numeric_rows',(SELECT count(*) FROM cells WHERE value_status='numeric'),
-          'x_rows',(SELECT count(*) FROM cells WHERE value_status='x'),
-          'invalid_rows',(SELECT count(*) FROM cells WHERE value_status IN ('invalid','missing')),
-          'duplicate_keys',(SELECT count(*) FROM (SELECT reporting_period,coordinates FROM cells
-             WHERE value_status='numeric' GROUP BY 1,2 HAVING count(*)>1) d),
-          'checks',coalesce((SELECT jsonb_agg(to_jsonb(q) ORDER BY check_name)
-             FROM taldau.quality_snapshot_checks q WHERE q.snapshot_id=s.snapshot_id),'[]'::jsonb),
-          'periods',coalesce((SELECT jsonb_agg(to_jsonb(p) ORDER BY period_code,reporting_period)
-             FROM taldau.quality_period_diagnostics p WHERE p.snapshot_id=s.snapshot_id),'[]'::jsonb)
-        ) FROM s""", (snapshot_id,))
-        row = cur.fetchone()
-    if not row:
+    snapshots = _snapshot_summaries(conn, snapshot_id=snapshot_id)
+    if not snapshots:
         raise ValueError(f"Unknown generic snapshot: {snapshot_id}")
-    return row[0]
+    return snapshots[0]
 
 
-def batch_summary(conn: Any, batch_id: str) -> dict:
-    batch = read_batch(conn, batch_id)
-    with conn.cursor() as cur:
-        cur.execute("SELECT snapshot_id FROM taldau.bronze_snapshots WHERE batch_id=%s ORDER BY indicator_key", (batch_id,))
-        snapshots = [snapshot_summary(conn, row[0]) for row in cur.fetchall()]
-    return {"batch_id": batch_id, "state": batch["state"], "year_start": batch["year_start"],
+def _batch_report(batch: dict, snapshots: list[dict]) -> dict:
+    return {"batch_id": batch["batch_id"], "state": batch["state"], "year_start": batch["year_start"],
             "year_end": batch["year_end"], "indicators_total": len(snapshots),
             "indicators_validated": sum(row["state"] in ("validated", "published") for row in snapshots),
             "indicators_failed": sum(row["state"] == "failed" for row in snapshots),
             "indicators_no_new_periods": sum(row["state"] == "no_new_periods" for row in snapshots),
             "snapshots": snapshots}
+
+
+def batch_summary(conn: Any, batch_id: str) -> dict:
+    """Full diagnostics: two queries for a validated batch, independent of its size."""
+    batch = read_batch(conn, batch_id)
+    return _batch_report(batch, _snapshot_summaries(conn, batch_id=batch_id))
+
+
+def batch_state_summary(conn: Any, batch_id: str) -> dict:
+    """Final task only: metadata states, never Bronze payloads, staging or reports."""
+    batch = read_batch(conn, batch_id)
+    with conn.cursor() as cur:
+        cur.execute("""SELECT snapshot_id,indicator_key,state FROM taldau.bronze_snapshots
+            WHERE batch_id=%s ORDER BY indicator_key""", (batch_id,))
+        snapshots = [dict(zip(("snapshot_id", "indicator_key", "state"), row)) for row in cur.fetchall()]
+    return _batch_report(batch, snapshots)

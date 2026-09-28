@@ -304,6 +304,60 @@ snapshot с новой revision на нужный indicator/year. Старый s
 
 ## Тесты без production
 
+### Стоимость diagnostics и финального шага
+
+Полный JSON строится только задачей `diagnostics` (один вызов на попытку задачи).
+`final_batch_summary` читает только строки `bronze_batches` и состояния `bronze_snapshots`,
+логирует компактный итог и после успешной проверки освобождает incremental owner. Неуспешное
+чтение или незавершённые snapshots не освобождают owner. Historical final task тоже отклоняет
+неуспешный/несогласованный итог. Retry diagnostics может повторить отчёт, final его не повторяет.
+
+`batch_summary` использует два SQL-запроса для проверенного batch независимо от числа показателей:
+metadata batch и общий агрегированный отчёт. Chunks читаются одним узким CTE; staging читается один
+раз с группировкой по `(snapshot_id, reporting_period, coordinates)`. В этой же группировке считаются
+staged/numeric/x/invalid; следующий агрегат суммирует счётчики и считает группы с более чем одной
+numeric-строкой. Широкая копия cells не материализуется. Группировка использует сами coordinates,
+чтобы не менять определение дублей из-за возможных коллизий coordinate_hash.
+
+Checks и periods агрегируются отдельно на snapshot. Raw responses считаются соединением списка
+run IDs с `bronze_run_raw`; JSON payload не разбирается. Для validated/published число доступных
+периодов берётся из `quality_period_diagnostics`, для no_new_periods равно 0. При неуспешной SQL
+валидации Python сохраняет точное число периодов в `empty_snapshot.details` вместе с результатом
+валидации: staging при ошибке может не содержать доступных периодов. Это не меняет violations,
+severity или критерии публикации. Дополнительное чтение inventory при ошибке входит во время
+validation, а не повторяется при каждом отчёте.
+
+JSON-ключи и CLI-команды не изменились. Для ещё не проверенных snapshots, старых failed snapshots
+без сохранённого inventory и исключений до завершения SQL validation остаётся один дополнительный
+запрос к period inventory для всего batch: так CLI сохраняет точное значение, а не подменяет его
+нулём. Это исключение может оставаться дорогим. Успешно проверенные snapshots к этому view не
+обращаются. Новый индекс, изменение схемы и SQL-миграция для оптимизации не требуются; нужна
+существующая схема 013. Полная агрегация по-прежнему линейна по staging и при большом числе
+уникальных координат может использовать временные файлы.
+
+Изолированный benchmark (PostgreSQL 17, 100 001 синтетическая строка, work_mem=4MB) дал:
+старый snapshot SQL — 214,405 мс; новый — 69,969 мс; temp read blocks 23 584 → 0,
+temp written blocks 5 896 → 0. Это примерно 3,1× для этого fixture, не прогноз production SLA.
+Повторный прогон: 203,250 → 72,662 мс (2,8×); старый план читает материализованный cells CTE
+пять раз, новый — ни разу. Оба плана читают staging одним scan node, но новый не копирует широкие
+cells во временный CTE и агрегирует счётчики совместно.
+Перед EXPLAIN проверяется равенство полного JSON старого и нового запросов.
+
+```powershell
+$env:TALDAU_BENCHMARK='1'
+.venv/Scripts/python.exe tests/run_synthetic_postgres.py test_statistics_summary
+Remove-Item Env:TALDAU_BENCHMARK
+```
+
+Безопасная доставка оптимизации: проверить diff и тесты, отдельным согласованным действием создать
+commit только изменённых файлов; поставить оба DAG на паузу, дождаться завершения текущих задач,
+доставить согласованные `statistics.py` и `orchestration.py` на scheduler и workers, проверить
+DagBag. Возобновить существующий batch при необходимости, не создавая новый и не очищая complete
+chunks. Сначала проверить extraction-only режим, время diagnostics, JSON и final task/owner;
+затем вернуть расписание и обычную политику публикации. Не сбрасывать validation/extraction ради
+повторного отчёта. Откат — вернуть предыдущий Python-код при остановленных задачах; новые поля
+details обратно совместимы, схема и данные Silver/Gold не меняются этой оптимизацией.
+
 Windows unit checks требуют `psycopg2`, `requests`, `tzdata` в `.venv`; Linux Airflow содержит
 системную базу часовых поясов. Полный suite без DB:
 

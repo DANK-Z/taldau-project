@@ -164,10 +164,14 @@ def build_statistics_dag(dag_id: str, *, incremental: bool = False):
         @task(trigger_rule="all_success" if incremental else "all_done", do_xcom_push=False)
         def final_batch_summary(batch_id):
             import logging
-            from taldau_elt.statistics import batch_summary
+            from taldau_elt.statistics import batch_state_summary
             conn = connection()
             try:
-                logging.getLogger(__name__).info("Final batch summary: %s", batch_summary(conn, batch_id))
+                report = batch_state_summary(conn, batch_id)
+                logging.getLogger(__name__).info("Final batch summary: %s", report)
+                if (report["state"] not in ("validated", "published") or not report["indicators_total"]
+                        or report["indicators_total"] != report["indicators_validated"] + report["indicators_no_new_periods"]):
+                    raise ValueError("Batch has incomplete or failed snapshots; resume the same batch")
                 if incremental:
                     from taldau_elt.statistics import finish_incremental_batch
                     finish_incremental_batch(conn, batch_id)
