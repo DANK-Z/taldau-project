@@ -29,7 +29,7 @@ validation → diagnostics. Pool `taldau_api` должен иметь ровно
 |---|---|---|
 | `year_start`, `year_end` | `null`, `null` | Оба пропущены: только логический год. Для backfill передавать оба |
 | `batch_id` | `""` | Автоматически: локальная logical date + SHA-256 от logical date/run ID |
-| `resume_failed` | `false` | Повторно поставить failed chunks в очередь в исходном batch |
+| `resume_failed` | `false` | Возобновить исходный batch; complete chunks не повторять |
 | `allow_extraction` | `true` | При `false` authorization завершается до HTTP |
 | `auto_publish` | `false` | Разрешает публикацию только после успешных проверок |
 
@@ -67,12 +67,33 @@ Raw из старого batch автоматически не переиспол
 ответа источника нужен новый batch, а не retry старого неизменяемого raw.
 
 В январе новый batch имеет scope только нового года. Поздние исправления предыдущего года
-обрабатываются отдельным явным backfill. Если для года ещё нет числовых данных по показателю,
-проверка empty_snapshot блокирует публикацию; пустой snapshot не очищает Silver/Gold.
+обрабатываются отдельным явным backfill.
+
+### Подтверждённое отсутствие новых периодов
+
+После discovery incremental snapshot проверяет `bronze_snapshot_available_periods`. Если периодов
+в frozen scope/cutoff нет, региональные extraction runs и chunks не создаются. SQL validation
+проверяет завершённый discovery с непустым корректным корневым ответом, checkpoints, целостность
+дерева, inventory и состояние всех существующих chunks, HTTP status, raw config и orphan keys.
+Только при нулевом staging и отсутствии остальных blocking violations `empty_snapshot` получает
+`violations=0` с причиной `no_new_periods`; snapshot переходит в одноимённое устойчивое состояние.
+Пустой массив вместо ожидаемого дерева, malformed response, HTTP failure, incomplete discovery,
+failed/queued/running chunks или доступный период при нулевом staging остаются ошибками.
+
+Переходы: `prepared → discovering → loading → validated → published`; подтверждённый пустой
+incremental scope переходит из discovery/validation в `no_new_periods`. Ошибка ведёт в `failed`;
+`resume_failed=true` возвращает его в `prepared`/`loading` и повторяет проверки. Для исторических
+snapshots без frozen `incremental_as_of` правило `empty_snapshot` остаётся строгим.
+
+`no_new_periods` — успешный терминальный результат без публикации. Batch с 7 validated и
+1 no_new_periods становится `validated`, с 7 published и 1 no_new_periods — `published`.
+Batch только с no_new_periods остаётся `validated`, включая `auto_publish=true`: опубликованных
+строк нет. Final task освобождает owner в обоих случаях. Следующий новый batch выполняет свежий
+discovery; resume завершённого snapshot не запрашивает новые данные источника.
 
 ## Первый запуск и backfill
 
-До первого запуска: применить согласованную миграцию 012, проверить DagBag и pool `taldau_api`,
+До первого запуска: применить согласованные миграции 012 и 013, проверить DagBag и pool `taldau_api`,
 оставить новый DAG на паузе до согласованного окна. `is_paused_upon_creation` действует лишь при
 первом создании записи DAG, а не при каждом обновлении кода. Старый historical DAG не переименовывать.
 
@@ -111,8 +132,8 @@ validation, diagnostics, trigger или publication сохраняет влад�
 годы, даже после смены календарного года. Сохранённый cutoff остаётся прежним. Изменить scope нельзя.
 Повторный запуск уже опубликованного batch сохраняет published-состояние.
 
-Если immutable raw повреждён или первый год ещё не опубликован источником, resume не сможет
-исправить его. Для отказа от такого batch: поставить DAG на паузу, остановить/завершить все его
+Если immutable raw повреждён, resume не сможет исправить его. Отсутствие опубликованного
+периода при успешном discovery после миграции 013 переклассифицируется в `no_new_periods`. Для отказа от такого batch: поставить DAG на паузу, остановить/завершить все его
 running и queued runs (включая continuation), проверить отсутствие активных workers/leases,
 зафиксировать причину отказа. Только после этого оператор может адресно освободить владельца:
 
@@ -139,14 +160,22 @@ raw, staging и опубликованные данные при отказе н
 {"batch_id": "taldau-inc-ORIGINAL-ID", "auto_publish": true}
 ```
 
-Перед публикацией нужны batch `validated`/`published`, все snapshots `validated`/`published`
-с `validated_at`, существующие blocking checks с нулём нарушений и ноль invalid/missing rows.
+Перед публикацией нужны batch `validated`/`published` и snapshots `validated`/`published` либо
+`no_new_periods`, каждый с `validated_at`. `publish_batch` полностью исключает no_new_periods:
+не вызывает для них публикацию и не выполняет INSERT/UPDATE/DELETE Silver/Gold, включая dimensions.
+Прямой вызов SQL `publish_snapshot` для такого snapshot возвращает 0 до изменения Silver/Gold.
+Для остальных нужны существующие blocking checks с нулём нарушений и ноль invalid/missing rows.
 Функции `taldau.publish_snapshot()` вызываются **последовательно в одной транзакции batch**.
 Каждая повторно валидирует snapshot, заменяет только его indicator/year scope и проверяет число
 строк и двусторонний Silver/Gold content EXCEPT. Эти проверки выполняются до COMMIT; для нового
 snapshot они не могут выполняться до INSERT, когда данных Silver/Gold ещё нет.
 Ошибка любого показателя откатывает весь batch и его published-флаг. Защита от публикации более
 старой revision поверх новой остаётся действующей.
+
+`batch_summary` и diagnostics отдельно показывают `indicators_no_new_periods`, не включая их
+в `indicators_failed` или `indicators_validated`. Snapshot summary содержит `state`,
+`no_new_periods`, `available_periods`, `staged_rows`; результат publish_batch содержит список
+пропущенных `no_new_periods` и `rows` только для опубликованных snapshots.
 
 Diagnostics сохраняются в `TALDAU_REPORT_DIR` (по умолчанию `/opt/airflow/data/reports`). Для SQL ниже
 `:batch_id` — параметр клиента; используйте свой ID, а не исторический production batch.
@@ -164,7 +193,9 @@ SELECT s.indicator_key,d.*
 FROM taldau.quality_period_diagnostics d JOIN taldau.bronze_snapshots s USING(snapshot_id)
 WHERE s.batch_id=:batch_id ORDER BY s.indicator_key,d.period_code;
 
-SELECT s.indicator_key,
+SELECT s.indicator_key,s.state,
+ (SELECT count(*) FROM taldau.bronze_snapshot_available_periods p
+  WHERE p.snapshot_id=s.snapshot_id) AS available_periods,
  (SELECT count(*) FROM taldau.staging_observation_cells v
   WHERE v.snapshot_id=s.snapshot_id AND v.value_status='numeric') AS staging_numeric,
  (SELECT count(*) FROM taldau.silver_observations v
@@ -194,7 +225,8 @@ snapshot перестаёт владеть текущими фактами; ср
 ## Deploy и rollback
 
 1. Отдельно согласовать резервирование и окно миграции. На существующей схеме 010/011 достаточно
-   применить `012_incremental_refresh.sql`. Bootstrap/CLI миграции включают её после 011.
+   применить `012_incremental_refresh.sql`, затем `013_incremental_no_new_periods.sql`.
+   Если 012 уже установлена, применить только 013. Bootstrap/CLI включают 013 после 012.
 2. Индекс `gold_fact_observations_lookup_idx` создаётся идемпотентно на
    `(indicator_key, coordinates, reporting_period) INCLUDE (value)`. На большой production-таблице
    согласовать блокировки и длительность `CREATE INDEX`; создание индекса — отдельное разрешение.
@@ -207,8 +239,10 @@ snapshot перестаёт владеть текущими фактами; ср
    вопрос `auto_publish` и включения регулярного расписания.
 
 Rollback кода: поставить incremental на паузу, остановить/завершить его задачи, вернуть прежние
-версии DAG/shared Python через Git из известной стабильной revision. Аддитивную миграцию,
-таблицы и индекс можно оставить. Historical DAG и batch `taldau-statistics-2023-2026-prod-v2`
+совместимые версии DAG/shared Python через Git из известной стабильной revision. После появления
+`no_new_periods` старый код может ошибочно считать batch незавершённым: не запускать его для таких
+batches и не возвращать старый CHECK constraint или функции 010 поверх 013. SQL 013, таблицы и
+индекс оставить; понижение схемы требует отдельного плана. Historical DAG и batch `taldau-statistics-2023-2026-prod-v2`
 сохраняют исходные ID, scope и frozen config; investment-only SQL 008, snapshots.py, coverage.py
 не переписаны.
 
@@ -216,6 +250,57 @@ Rollback данных — отдельная проверенная операц
 snapshot с новой revision на нужный indicator/year. Старый snapshot нельзя просто publish поверх
 новой revision: существующая защита правильно отклоняет такой rollback. До включения auto_publish
 текущие Silver/Gold не меняются.
+
+## CLI: миграция 013 и resume инцидента
+
+Команды ниже — план для уполномоченного оператора, здесь они не выполнялись. Подключение задаётся
+внешней защищённой конфигурацией оператора; `.env` и production credentials не нужны для тестов.
+
+1. Поставить incremental DAG на паузу, дождаться остановки всех его running/queued задач и
+   continuation runs; проверить отсутствие активных workers и leases. Сохранить диагностику и
+   резервную копию по действующему регламенту. Не удалять owner или snapshots.
+2. На схеме с установленной 012 применить **только** 013 в одной транзакции с ограничением ожидания
+   блокировки. Миграция меняет snapshot CHECK, view и две функции; строки snapshots и Silver/Gold
+   не переписывает. CHECK требует кратковременной блокировки `bronze_snapshots` и проверки таблицы.
+
+   ```sh
+   PGOPTIONS='-c lock_timeout=5s -c statement_timeout=120s' psql -X --set=ON_ERROR_STOP=1 --single-transaction --file=dags/taldau_elt/sql/013_incremental_no_new_periods.sql
+   ```
+
+   При timeout/ошибке транзакция откатывается: устранить блокировку и повторить в согласованном окне.
+   Общая команда `python tools/manage_statistics_batch.py migrate` включает 010–013; для этого
+   production hotfix используйте адресное применение 013 выше, без replay старых миграций.
+3. Доставить совместимые `statistics.py` и `orchestration.py`, проверить DagBag и pool 3. Снять
+   incremental DAG с паузы только после установки SQL и кода; не использовать historical CLI launch.
+4. Отправить один ручной запуск **того же** incremental batch:
+
+   ```sh
+   airflow dags trigger taldau_statistics_incremental --run-id resume-no-periods-20260920 --conf '{"batch_id":"taldau-inc-20260920T070000-6e4610389f4b44482e25856c","resume_failed":true,"auto_publish":false}'
+   ```
+
+   Годы и cutoff берутся из существующего batch. Snapshot
+   `population-2026-2026-8c670a44b35fe312` повторно валидируется по сохранённому Bronze;
+   его 266 complete chunks остаются complete с прежними attempts, HTTP для него не выполняется.
+   При других ошибках batch остаётся незавершённым и owner сохраняется.
+5. Проверить результат через read-only CLI:
+
+   ```sh
+   python tools/manage_statistics_batch.py status --batch-id taldau-inc-20260920T070000-6e4610389f4b44482e25856c
+   python tools/manage_statistics_batch.py snapshot --snapshot-id population-2026-2026-8c670a44b35fe312
+   ```
+
+   Ожидается `state=no_new_periods`, `available_periods=0`, `staged_rows=0`, 266 complete,
+   `indicators_no_new_periods=1`, `indicators_failed=0`, успешный final task и отсутствие owner.
+   Остальные 7 snapshots должны быть validated/published; опубликованные population факты неизменны.
+6. Если нужна публикация остальных показателей, после проверки отправить тот же batch с
+   `auto_publish=true` (новый уникальный Airflow run-id):
+
+   ```sh
+   airflow dags trigger taldau_statistics_incremental --run-id publish-no-periods-20260920 --conf '{"batch_id":"taldau-inc-20260920T070000-6e4610389f4b44482e25856c","auto_publish":true}'
+   ```
+
+   Все 7 публикаций выполняются одной транзакцией; population полностью пропускается. Проверить
+   batch `published`, reconciliation, final task и освобождение owner. Новый batch не создавать.
 
 ## Тесты без production
 

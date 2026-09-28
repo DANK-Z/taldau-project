@@ -78,7 +78,7 @@ def build_statistics_dag(dag_id: str, *, incremental: bool = False):
             try:
                 with conn.cursor() as cur:
                     cur.execute("""SELECT snapshot_id FROM taldau.bronze_snapshots
-                        WHERE batch_id=%s AND state NOT IN ('validated','published') ORDER BY indicator_key""", (batch_id,))
+                        WHERE batch_id=%s AND state NOT IN ('validated','published','no_new_periods') ORDER BY indicator_key""", (batch_id,))
                     return [row[0] for row in cur.fetchall()]
             finally:
                 conn.close()

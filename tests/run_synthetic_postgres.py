@@ -62,6 +62,7 @@ def main():
             env.pop('PGSERVICE', None)
             env.pop('PGSERVICEFILE', None)
             selectors = sys.argv[1:] or ['test_multi_indicator_framework', 'test_incremental_statistics',
+                                        'test_incremental_no_new_periods',
                                         'test_single_taldau_schema.FreshSingleSchemaTests']
             print('Isolated TALDAU_TEST_DB: disposable PostgreSQL 17, synthetic fixtures only.', flush=True)
             return subprocess.run([sys.executable, '-m', 'unittest', *selectors, '-v'],

@@ -62,7 +62,8 @@ def main() -> None:
         if args.action in ("status", "snapshot"):
             conn.set_session(readonly=True, isolation_level="REPEATABLE READ")
         if args.action == "migrate":
-            names = ["010_multi_indicator_framework.sql", "011_indicator_registry_sources.sql", "012_incremental_refresh.sql"]
+            names = ["010_multi_indicator_framework.sql", "011_indicator_registry_sources.sql",
+                     "012_incremental_refresh.sql", "013_incremental_no_new_periods.sql"]
             with conn:
                 with conn.cursor() as cur:
                     for name in names:

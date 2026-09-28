@@ -284,6 +284,9 @@ def discover_snapshot(conn: Any, snapshot_id: str, *, allow_http: bool) -> dict:
     _lock(conn, run_id)
     loader: GenericTrackedLoader | None = None
     try:
+        snapshot = read_snapshot(conn, snapshot_id)
+        if snapshot["discovery_complete"]:
+            return {"snapshot_id": snapshot_id, "chunks": snapshot["expected_chunks"], "http_requests": 0}
         config = snapshot["source_config"]
         dimensions = config["dimensions"]
         first = dimensions[0]["key"]
@@ -302,6 +305,17 @@ def discover_snapshot(conn: Any, snapshot_id: str, *, allow_http: bool) -> dict:
                 cur.execute("SELECT taldau.stage_snapshot_run(%s,%s)", (snapshot_id, run_id))
                 cur.execute("UPDATE taldau.bronze_extraction_runs SET status='bronze_complete',completed_at=now() WHERE run_id=%s",
                             (run_id,))
+                if snapshot["batch_id"] and "incremental_as_of" in config:
+                    cur.execute("""SELECT EXISTS (SELECT 1 FROM taldau.bronze_snapshot_available_periods
+                        WHERE snapshot_id=%s)""", (snapshot_id,))
+                    if not cur.fetchone()[0]:
+                        cur.execute("""UPDATE taldau.bronze_snapshots SET discovery_complete=true,
+                            expected_chunks=(SELECT count(*) FROM taldau.bronze_chunks WHERE snapshot_id=%s)
+                            WHERE snapshot_id=%s""", (snapshot_id, snapshot_id))
+                        cur.execute("SELECT taldau.validate_snapshot(%s)", (snapshot_id,))
+                        result = cur.fetchone()[0]
+                        return {**result, "chunks": 0, "http_requests": loader.http_count,
+                                "available_periods": []}
                 pipeline_id = "statistics_" + snapshot["indicator_key"]
                 cur.execute("""INSERT INTO taldau.bronze_extraction_runs(run_id,pipeline_id,config,scope)
                     SELECT %s||':chunk:'||member_id,%s,%s,
@@ -469,15 +483,18 @@ def validate_batch(conn: Any, batch_id: str) -> dict:
     with conn:
         with conn.cursor() as cur:
             cur.execute("""SELECT count(*) FILTER(WHERE state IN ('validated','published')),
-                count(*) FILTER(WHERE state='failed'),count(*)
+                count(*) FILTER(WHERE state='failed'),count(*),
+                count(*) FILTER(WHERE state='no_new_periods')
                 FROM taldau.bronze_snapshots WHERE batch_id=%s""", (batch_id,))
-            valid, failed, total = cur.fetchone()
+            valid, failed, total, no_new = cur.fetchone()
             cur.execute("SELECT count(*) FROM taldau.bronze_snapshots WHERE batch_id=%s AND state='published'", (batch_id,))
             published = cur.fetchone()[0]
-            state = ("published" if total and published == total else "validated" if total and valid == total
-                     else "failed" if valid == 0 else "partially_validated")
+            state = ("published" if published and published + no_new == total
+                     else "validated" if total and valid + no_new == total
+                     else "failed" if valid + no_new == 0 else "partially_validated")
             cur.execute("UPDATE taldau.bronze_batches SET state=%s,completed_at=now() WHERE batch_id=%s", (state, batch_id))
-    return {"batch_id": batch_id, "state": state, "validated": valid, "failed": failed, "results": results}
+    return {"batch_id": batch_id, "state": state, "validated": valid, "failed": failed,
+            "no_new_periods": no_new, "results": results}
 
 
 def publish_snapshot(conn: Any, snapshot_id: str) -> int:
@@ -506,9 +523,11 @@ def publish_batch(conn: Any, batch_id: str, *, auto_publish: bool = False) -> di
             cur.execute("""SELECT snapshot_id,state,validated_at FROM taldau.bronze_snapshots
                 WHERE batch_id=%s ORDER BY indicator_key FOR UPDATE""", (batch_id,))
             snapshots = cur.fetchall()
-            if not snapshots or any(state not in ("validated", "published") or at is None
+            if not snapshots or any(state not in ("validated", "published", "no_new_periods") or at is None
                                     for _, state, at in snapshots):
-                raise ValueError("Every snapshot must be validated or published")
+                raise ValueError("Every snapshot must be validated, published or no_new_periods")
+            skipped = [sid for sid, state, _ in snapshots if state == "no_new_periods"]
+            snapshots = [row for row in snapshots if row[1] != "no_new_periods"]
             for sid, _, _ in snapshots:
                 cur.execute("""SELECT count(*),coalesce(sum(violations),0)
                     FROM taldau.quality_snapshot_checks WHERE snapshot_id=%s AND severity='blocking'""", (sid,))
@@ -523,7 +542,7 @@ def publish_batch(conn: Any, batch_id: str, *, auto_publish: bool = False) -> di
                 # Do not call the Python wrapper: its context manager commits per indicator.
                 cur.execute("SELECT taldau.publish_snapshot(%s)", (sid,))
                 rows[sid] = cur.fetchone()[0]
-    return {"batch_id": batch_id, "published": True, "rows": rows}
+    return {"batch_id": batch_id, "published": True, "rows": rows, "no_new_periods": skipped}
 
 
 def finish_incremental_batch(conn: Any, batch_id: str) -> None:
@@ -547,6 +566,10 @@ def snapshot_summary(conn: Any, snapshot_id: str) -> dict:
         SELECT jsonb_build_object(
           'snapshot_id',s.snapshot_id,'indicator_key',s.indicator_key,'state',s.state,
           'year_start',s.year_start,'year_end',s.year_end,
+          'no_new_periods',s.state='no_new_periods',
+          'staged_rows',(SELECT count(*) FROM cells),
+          'available_periods',(SELECT count(*) FROM taldau.bronze_snapshot_available_periods p
+             WHERE p.snapshot_id=s.snapshot_id),
           'chunks_total',(SELECT count(*) FROM chunks),
           'chunks_complete',(SELECT count(*) FROM chunks WHERE state='complete'),
           'chunks_failed',(SELECT count(*) FROM chunks WHERE state='failed'),
@@ -577,4 +600,5 @@ def batch_summary(conn: Any, batch_id: str) -> dict:
             "year_end": batch["year_end"], "indicators_total": len(snapshots),
             "indicators_validated": sum(row["state"] in ("validated", "published") for row in snapshots),
             "indicators_failed": sum(row["state"] == "failed" for row in snapshots),
+            "indicators_no_new_periods": sum(row["state"] == "no_new_periods" for row in snapshots),
             "snapshots": snapshots}
