@@ -146,6 +146,37 @@ class AirflowRuntimeTests(unittest.TestCase):
         if cls.bag.import_errors:
             raise AssertionError(cls.bag.import_errors)
 
+    def test_full_dag_directory_scan_ignores_package_but_entry_points_import_it(self):
+        import os
+        from airflow.configuration import conf
+        from airflow.models import DagBag
+        from airflow.utils.file import list_py_file_paths
+
+        dag_root = ROOT / 'dags'
+        expected_files = {dag_root / 'taldau_statistics_incremental.py',
+                          dag_root / 'taldau_statistics_2023_2026.py'}
+        with patch.dict(os.environ, {'AIRFLOW__CORE__DAG_IGNORE_FILE_SYNTAX': 'regexp'}):
+            self.assertEqual(conf.get('core', 'dag_ignore_file_syntax'), 'regexp')
+            # Disable safe-mode heuristics: .airflowignore must exclude the package
+            # itself, not merely rely on its modules containing no DAG-like text.
+            candidates = {Path(path) for path in list_py_file_paths(str(dag_root), safe_mode=False)}
+            self.assertEqual(candidates, expected_files)
+            bag = DagBag(dag_folder=str(dag_root), include_examples=False, safe_mode=False)
+
+        self.assertEqual(bag.import_errors, {})
+        self.assertEqual(set(bag.dags), {'taldau_statistics_incremental', 'taldau_statistics_2023_2026'})
+        self.assertEqual({Path(path) for path in bag.file_last_changed}, expected_files)
+        for name in ('statistics', 'orchestration'):
+            module = importlib.import_module('taldau_elt.' + name)
+            self.assertEqual(Path(module.__file__).resolve(), (dag_root / 'taldau_elt' / (name + '.py')).resolve())
+            self.assertNotIn(Path(module.__file__), candidates)
+        self.assertIsNone(bag.dags['taldau_statistics_2023_2026'].schedule_interval)
+        for dag_id, dag in bag.dags.items():
+            original = self.bag.dags[dag_id]
+            self.assertEqual(dag.task_ids, original.task_ids)
+            self.assertEqual(dict(dag.params), dict(original.params))
+            self.assertEqual(dag.timetable.serialize(), original.timetable.serialize())
+
     def operator(self):
         from taldau_elt.airflow_compat import SkipExistingDagRunOperator
         return SkipExistingDagRunOperator(
